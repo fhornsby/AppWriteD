@@ -249,24 +249,32 @@ final class Future(T)
             errorCallbacks = null;
             done.notifyAll();
         }
-        scope (exit)
+        // A throwing callback (run inline by ImmediateDispatcher) must still
+        // leave the future finished. (catch rather than scope(exit): LDC's
+        // Windows exception lowering rejects a lock inside a cleanup block.)
+        Throwable thrown;
+        try
         {
-            synchronized (lock)
+            if (exception is null)
             {
-                finished = true;
-                done.notifyAll();
+                foreach (callback; successes)
+                    deliver(callback, null);
+            }
+            else
+            {
+                foreach (callback; failures)
+                    deliver(null, callback);
             }
         }
-        if (exception is null)
+        catch (Throwable t)
+            thrown = t;
+        synchronized (lock)
         {
-            foreach (callback; successes)
-                deliver(callback, null);
+            finished = true;
+            done.notifyAll();
         }
-        else
-        {
-            foreach (callback; failures)
-                deliver(null, callback);
-        }
+        if (thrown !is null)
+            throw thrown;
     }
 
     private void deliver(SuccessCallback onSuccess, ErrorCallback onError)
