@@ -1,0 +1,281 @@
+/**
+ * The few libcurl functions the realtime connection needs beyond what
+ * std.net.curl wraps.
+ *
+ * Like std.net.curl, the library is loaded at run time, so building an app
+ * needs no curl development files. libcurl does the TCP connection, any proxy
+ * and TLS; the WebSocket protocol itself is in `appwrite.websocket`, so any
+ * libcurl version works, including builds without WebSocket support.
+ */
+module appwrite.curl;
+
+import core.stdc.config : c_long;
+import std.string : fromStringz, toStringz;
+
+import appwrite.exception;
+
+alias CURL = void;
+alias CURLcode = int;
+
+enum : CURLcode
+{
+    CURLE_OK = 0,
+    CURLE_AGAIN = 81,
+}
+
+enum : int
+{
+    CURLOPT_URL = 10_002,
+    CURLOPT_ERRORBUFFER = 10_010,
+    CURLOPT_HTTPPROXYTUNNEL = 61,
+    CURLOPT_SSL_VERIFYPEER = 64,
+    CURLOPT_SSL_VERIFYHOST = 81,
+    CURLOPT_NOSIGNAL = 99,
+    CURLOPT_CONNECT_ONLY = 141,
+    CURLOPT_CONNECTTIMEOUT_MS = 156,
+}
+
+enum int CURLINFO_ACTIVESOCKET = 0x500000 + 44;
+enum int CURLINFO_LASTSOCKET = 0x200000 + 29;
+
+version (Windows)
+    alias curl_socket_t = size_t;
+else
+    alias curl_socket_t = int;
+
+private extern (C) nothrow @nogc
+{
+    alias easy_init_t = CURL* function();
+    alias easy_setopt_t = CURLcode function(CURL*, int, ...);
+    alias easy_perform_t = CURLcode function(CURL*);
+    alias easy_getinfo_t = CURLcode function(CURL*, int, ...);
+    alias easy_send_t = CURLcode function(CURL*, const(void)*, size_t, size_t*);
+    alias easy_recv_t = CURLcode function(CURL*, void*, size_t, size_t*);
+    alias easy_cleanup_t = void function(CURL*);
+    alias easy_strerror_t = const(char)* function(CURLcode);
+}
+
+private struct Api
+{
+    easy_init_t easy_init;
+    easy_setopt_t easy_setopt;
+    easy_perform_t easy_perform;
+    easy_getinfo_t easy_getinfo;
+    easy_send_t easy_send;
+    easy_recv_t easy_recv;
+    easy_cleanup_t easy_cleanup;
+    easy_strerror_t easy_strerror;
+}
+
+private __gshared Api api;
+private __gshared bool loaded;
+
+private Api* loadApi()
+{
+    synchronized
+    {
+        if (loaded)
+            return &api;
+
+        version (OSX)
+            static immutable names = ["libcurl.4.dylib", "libcurl.dylib"];
+        else version (Windows)
+            static immutable names = ["libcurl.dll", "curl.dll", "libcurl-x64.dll", "libcurl-4.dll"];
+        else
+            static immutable names = ["libcurl.so.4", "libcurl.so", "libcurl-gnutls.so.4", "libcurl-nss.so.4", "libcurl.so.3"];
+
+        void* handle;
+        foreach (name; names)
+        {
+            handle = openLibrary(name);
+            if (handle !is null)
+                break;
+        }
+        if (handle is null)
+            throw new AppwriteException("Realtime needs libcurl, which could not be loaded");
+
+        api.easy_init = cast(easy_init_t) symbol(handle, "curl_easy_init");
+        api.easy_setopt = cast(easy_setopt_t) symbol(handle, "curl_easy_setopt");
+        api.easy_perform = cast(easy_perform_t) symbol(handle, "curl_easy_perform");
+        api.easy_getinfo = cast(easy_getinfo_t) symbol(handle, "curl_easy_getinfo");
+        api.easy_send = cast(easy_send_t) symbol(handle, "curl_easy_send");
+        api.easy_recv = cast(easy_recv_t) symbol(handle, "curl_easy_recv");
+        api.easy_cleanup = cast(easy_cleanup_t) symbol(handle, "curl_easy_cleanup");
+        api.easy_strerror = cast(easy_strerror_t) symbol(handle, "curl_easy_strerror");
+        if (api.easy_init is null || api.easy_setopt is null || api.easy_perform is null || api.easy_getinfo is null
+                || api.easy_send is null || api.easy_recv is null || api.easy_cleanup is null || api.easy_strerror is null)
+            throw new AppwriteException("The libcurl found is too old for realtime (7.18.2 or newer is needed)");
+        loaded = true;
+        return &api;
+    }
+}
+
+version (Windows)
+{
+    import core.sys.windows.windows : GetProcAddress, HMODULE, LoadLibraryA;
+
+    private void* openLibrary(string name)
+    {
+        return cast(void*) LoadLibraryA(name.toStringz);
+    }
+
+    private void* symbol(void* handle, string name)
+    {
+        return cast(void*) GetProcAddress(cast(HMODULE) handle, name.toStringz);
+    }
+}
+else
+{
+    import core.sys.posix.dlfcn : dlopen, dlsym, RTLD_LAZY;
+
+    private void* openLibrary(string name)
+    {
+        return dlopen(name.toStringz, RTLD_LAZY);
+    }
+
+    private void* symbol(void* handle, string name)
+    {
+        return dlsym(handle, name.toStringz);
+    }
+}
+
+/**
+ * A raw connection opened by libcurl in "connect only" mode: TCP, proxy
+ * tunnel and TLS are set up, and bytes are then sent and received as-is.
+ */
+final class CurlConnection
+{
+    private Api* curl;
+    private CURL* handle;
+    private char[256] errorBuffer;
+    private curl_socket_t socket;
+
+    /// Connect to `url` (http:// or https://).
+    this(string url, bool insecure, long connectTimeoutMs)
+    {
+        curl = loadApi();
+        handle = curl.easy_init();
+        if (handle is null)
+            throw new AppwriteException("Could not create a libcurl handle");
+        errorBuffer[] = 0;
+        check(curl.easy_setopt(handle, CURLOPT_URL, url.toStringz));
+        check(curl.easy_setopt(handle, CURLOPT_CONNECT_ONLY, cast(c_long) 1));
+        check(curl.easy_setopt(handle, CURLOPT_NOSIGNAL, cast(c_long) 1));
+        check(curl.easy_setopt(handle, CURLOPT_HTTPPROXYTUNNEL, cast(c_long) 1));
+        check(curl.easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, cast(c_long) connectTimeoutMs));
+        check(curl.easy_setopt(handle, CURLOPT_ERRORBUFFER, errorBuffer.ptr));
+        if (insecure)
+        {
+            check(curl.easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, cast(c_long) 0));
+            check(curl.easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, cast(c_long) 0));
+        }
+        check(curl.easy_perform(handle));
+
+        curl_socket_t active;
+        if (curl.easy_getinfo(handle, CURLINFO_ACTIVESOCKET, &active) == CURLE_OK)
+            socket = active;
+        else
+        {
+            c_long last;
+            check(curl.easy_getinfo(handle, CURLINFO_LASTSOCKET, &last));
+            socket = cast(curl_socket_t) last;
+        }
+    }
+
+    ~this()
+    {
+        close();
+    }
+
+    /// Send all of `data`, waiting up to `timeoutMs` for the socket to accept it.
+    void send(const(ubyte)[] data, int timeoutMs = 10_000)
+    {
+        while (data.length)
+        {
+            if (handle is null)
+                throw new AppwriteException("Connection closed");
+            size_t sent;
+            auto code = curl.easy_send(handle, data.ptr, data.length, &sent);
+            if (code == CURLE_AGAIN)
+            {
+                if (!waitSocket(socket, false, timeoutMs))
+                    throw new AppwriteException("Timed out sending to the realtime server");
+                continue;
+            }
+            check(code);
+            data = data[sent .. $];
+        }
+    }
+
+    /**
+     * Receive into `buffer`, waiting up to `timeoutMs`. Returns the number of
+     * bytes read, 0 on timeout, and throws when the connection is closed.
+     */
+    size_t receive(ubyte[] buffer, int timeoutMs)
+    {
+        if (handle is null)
+            throw new AppwriteException("Connection closed");
+        foreach (attempt; 0 .. 2)
+        {
+            size_t received;
+            auto code = curl.easy_recv(handle, buffer.ptr, buffer.length, &received);
+            if (code == CURLE_OK)
+            {
+                if (received == 0)
+                    throw new AppwriteException("The realtime server closed the connection");
+                return received;
+            }
+            if (code != CURLE_AGAIN)
+                check(code);
+            if (attempt == 0 && !waitSocket(socket, true, timeoutMs))
+                return 0;
+        }
+        return 0;
+    }
+
+    void close()
+    {
+        if (handle !is null)
+        {
+            curl.easy_cleanup(handle);
+            handle = null;
+        }
+    }
+
+    private void check(CURLcode code)
+    {
+        if (code == CURLE_OK)
+            return;
+        auto detail = fromStringz(errorBuffer.ptr).idup;
+        auto message = detail.length ? detail : fromStringz(curl.easy_strerror(code)).idup;
+        throw new AppwriteException(message);
+    }
+}
+
+/// Wait until `socket` is readable (or writable). Returns false on timeout.
+private bool waitSocket(curl_socket_t socket, bool forRead, int timeoutMs)
+{
+    version (Windows)
+    {
+        import core.sys.windows.winsock2 : fd_set, select, timeval, FD_SET, FD_ZERO;
+
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(socket, &set);
+        timeval tv;
+        tv.tv_sec = timeoutMs / 1000;
+        tv.tv_usec = (timeoutMs % 1000) * 1000;
+        auto ready = forRead ? select(0, &set, null, null, &tv) : select(0, null, &set, null, &tv);
+        return ready > 0;
+    }
+    else
+    {
+        import core.sys.posix.poll : poll, pollfd, POLLIN, POLLOUT;
+
+        pollfd entry;
+        entry.fd = socket;
+        entry.events = forRead ? POLLIN : POLLOUT;
+        return poll(&entry, 1, timeoutMs) > 0;
+    }
+}
+

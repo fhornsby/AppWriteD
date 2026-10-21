@@ -1,0 +1,6 @@
+/// API services.
+module appwrite.services;
+
+{% for service in services %}
+public import appwrite.services.{{ service.name | dModule }};
+{% endfor %}

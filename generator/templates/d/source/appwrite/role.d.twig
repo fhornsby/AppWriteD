@@ -1,0 +1,50 @@
+{% verbatim %}module appwrite.role;
+
+/// Helpers for the role strings `Permission` takes.
+struct Role
+{
+    @disable this();
+
+    /// Anyone, signed in or not.
+    static string any()
+    {
+        return "any";
+    }
+
+    /// The user with ID `id`. Pass `"verified"` or `"unverified"` as `status` to narrow it.
+    static string user(string id, string status = "")
+    {
+        return status.length ? "user:" ~ id ~ "/" ~ status : "user:" ~ id;
+    }
+
+    /// Any signed-in or anonymous user. Pass `"verified"` or `"unverified"` as `status` to narrow it.
+    static string users(string status = "")
+    {
+        return status.length ? "users/" ~ status : "users";
+    }
+
+    /// Anyone without a session.
+    static string guests()
+    {
+        return "guests";
+    }
+
+    /// Members of team `id`, optionally only those with the team role `role`.
+    static string team(string id, string role = "")
+    {
+        return role.length ? "team:" ~ id ~ "/" ~ role : "team:" ~ id;
+    }
+
+    /// One membership of a team; access ends when the member leaves.
+    static string member(string id)
+    {
+        return "member:" ~ id;
+    }
+
+    /// Users with the label `name`.
+    static string label(string name)
+    {
+        return "label:" ~ name;
+    }
+}
+{% endverbatim %}

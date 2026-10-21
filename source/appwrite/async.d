@@ -1,0 +1,343 @@
+/**
+ * Running requests without blocking a UI thread.
+ *
+ * Every service method is synchronous. `async` runs one on a worker thread and
+ * returns a `Future`; its callbacks go through a `Dispatcher`, which decides
+ * which thread runs them. A UI toolkit typically uses a `QueueDispatcher` and
+ * drains it from its event loop, so callbacks run on the UI thread, much like
+ * awaiting a Future in Flutter:
+ *
+ * ---
+ * auto ui = new QueueDispatcher;
+ * setDefaultDispatcher(ui);
+ *
+ * async(() => account.get())
+ *     .then((models.User user) { nameLabel.text = user.name; })
+ *     .onError((Exception e) { showError(e.msg); });
+ *
+ * // In the toolkit's event loop, on the UI thread:
+ * ui.process();
+ * ---
+ *
+ * Realtime callbacks are delivered through the same dispatcher.
+ */
+module appwrite.async;
+
+import core.sync.condition : Condition;
+import core.sync.mutex : Mutex;
+import std.traits : isCallable, ReturnType;
+
+/// Decides where callbacks run.
+interface Dispatcher
+{
+    /// Arrange for `task` to run.
+    void post(void delegate() task);
+}
+
+/// Runs each callback at once, on the thread that produced the result.
+final class ImmediateDispatcher : Dispatcher
+{
+    void post(void delegate() task)
+    {
+        task();
+    }
+}
+
+/**
+ * Queues callbacks until `process` is called, so they run on the thread that
+ * calls it (normally the UI thread).
+ */
+final class QueueDispatcher : Dispatcher
+{
+    private void delegate()[] queue;
+    private Mutex lock;
+    private void delegate() wakeup;
+
+    this()
+    {
+        lock = new Mutex;
+    }
+
+    /**
+     * Called (on the posting thread) whenever a callback is queued. Use it to
+     * wake an event loop that sleeps until there is work, e.g. by posting an
+     * empty event to the toolkit.
+     */
+    void setWakeup(void delegate() wakeup)
+    {
+        synchronized (lock)
+            this.wakeup = wakeup;
+    }
+
+    void post(void delegate() task)
+    {
+        void delegate() wake;
+        synchronized (lock)
+        {
+            queue ~= task;
+            wake = wakeup;
+        }
+        if (wake !is null)
+            wake();
+    }
+
+    /// Run up to `limit` queued callbacks in order. Returns how many ran.
+    size_t process(size_t limit = size_t.max)
+    {
+        size_t ran;
+        while (ran < limit)
+        {
+            void delegate() task;
+            synchronized (lock)
+            {
+                if (queue.length == 0)
+                    break;
+                task = queue[0];
+                queue = queue[1 .. $];
+            }
+            task();
+            ran++;
+        }
+        return ran;
+    }
+
+    /// Number of callbacks waiting.
+    size_t pending()
+    {
+        synchronized (lock)
+            return queue.length;
+    }
+}
+
+private __gshared Dispatcher defaultDispatcher;
+
+shared static this()
+{
+    defaultDispatcher = new ImmediateDispatcher;
+}
+
+/// The dispatcher `async` and `Realtime` use unless given another.
+Dispatcher getDefaultDispatcher()
+{
+    synchronized
+        return defaultDispatcher;
+}
+
+/// Replace the default dispatcher, e.g. with a `QueueDispatcher` drained by your UI loop.
+void setDefaultDispatcher(Dispatcher dispatcher)
+{
+    synchronized
+        defaultDispatcher = dispatcher is null ? new ImmediateDispatcher : dispatcher;
+}
+
+/// The eventual result of work started with `async`.
+final class Future(T)
+{
+    static if (is(T == void))
+        alias SuccessCallback = void delegate();
+    else
+        alias SuccessCallback = void delegate(T);
+    alias ErrorCallback = void delegate(Exception);
+
+    private Mutex lock;
+    private Condition done;
+    private Dispatcher dispatcher;
+    private bool finished;
+    static if (!is(T == void))
+        private T value;
+    private Exception error;
+    private SuccessCallback[] successCallbacks;
+    private ErrorCallback[] errorCallbacks;
+
+    this(Dispatcher dispatcher = null)
+    {
+        lock = new Mutex;
+        done = new Condition(lock);
+        this.dispatcher = dispatcher is null ? getDefaultDispatcher() : dispatcher;
+    }
+
+    /// Whether the work has finished, successfully or not.
+    bool isDone()
+    {
+        synchronized (lock)
+            return finished;
+    }
+
+    /// Block until the work finishes, then return its result or rethrow its exception.
+    T get()
+    {
+        synchronized (lock)
+        {
+            while (!finished)
+                done.wait();
+            if (error !is null)
+                throw error;
+            static if (!is(T == void))
+                return value;
+        }
+    }
+
+    /// Call `onSuccess` with the result (or `onError` with the exception) through the dispatcher.
+    Future then(SuccessCallback onSuccess, ErrorCallback onError = null)
+    {
+        bool runNow;
+        synchronized (lock)
+        {
+            if (!finished)
+            {
+                if (onSuccess !is null)
+                    successCallbacks ~= onSuccess;
+                if (onError !is null)
+                    errorCallbacks ~= onError;
+            }
+            else
+                runNow = true;
+        }
+        if (runNow)
+            deliver(onSuccess, onError);
+        return this;
+    }
+
+    /// Call `callback` through the dispatcher if the work fails.
+    Future onError(ErrorCallback callback)
+    {
+        return then(null, callback);
+    }
+
+    static if (is(T == void))
+    {
+        /// Complete successfully.
+        void complete()
+        {
+            finish(null);
+        }
+    }
+    else
+    {
+        /// Complete successfully with `result`.
+        void complete(T result)
+        {
+            synchronized (lock)
+                value = result;
+            finish(null);
+        }
+    }
+
+    /// Complete with an exception.
+    void fail(Exception exception)
+    {
+        finish(exception);
+    }
+
+    private void finish(Exception exception)
+    {
+        SuccessCallback[] successes;
+        ErrorCallback[] failures;
+        synchronized (lock)
+        {
+            if (finished)
+                return;
+            finished = true;
+            error = exception;
+            successes = successCallbacks;
+            failures = errorCallbacks;
+            successCallbacks = null;
+            errorCallbacks = null;
+            done.notifyAll();
+        }
+        if (exception is null)
+        {
+            foreach (callback; successes)
+                deliver(callback, null);
+        }
+        else
+        {
+            foreach (callback; failures)
+                deliver(null, callback);
+        }
+    }
+
+    private void deliver(SuccessCallback onSuccess, ErrorCallback onError)
+    {
+        Exception failure;
+        synchronized (lock)
+            failure = error;
+        if (failure !is null)
+        {
+            if (onError !is null)
+                dispatcher.post(() => onError(failure));
+            return;
+        }
+        if (onSuccess is null)
+            return;
+        static if (is(T == void))
+            dispatcher.post(() => onSuccess());
+        else
+        {
+            T result;
+            synchronized (lock)
+                result = value;
+            dispatcher.post(() => onSuccess(result));
+        }
+    }
+}
+
+/**
+ * Run `work` on a worker thread and return a `Future` for its result.
+ * Callbacks registered on the future run through `dispatcher` (the default
+ * dispatcher when null).
+ */
+auto async(F)(F work, Dispatcher dispatcher = null) if (isCallable!F)
+{
+    import std.functional : toDelegate;
+    import std.parallelism : task, taskPool;
+
+    alias T = ReturnType!F;
+    auto future = new Future!T(dispatcher);
+    auto run = toDelegate(work);
+    taskPool.put(task({
+        try
+        {
+            static if (is(T == void))
+            {
+                run();
+                future.complete();
+            }
+            else
+                future.complete(run());
+        }
+        catch (Exception e)
+            future.fail(e);
+    }));
+    return future;
+}
+
+unittest
+{
+    import core.atomic : atomicLoad, atomicOp;
+
+    auto ui = new QueueDispatcher;
+    shared int calls;
+    auto future = async(() => 21 * 2, ui);
+    assert(future.get() == 42);
+    future.then((int value) { assert(value == 42); atomicOp!"+="(calls, 1); });
+    assert(atomicLoad(calls) == 0);
+    assert(ui.process() == 1);
+    assert(atomicLoad(calls) == 1);
+
+    auto failing = async(delegate int() { throw new Exception("boom"); }, ui);
+    failing.onError((Exception e) { assert(e.msg == "boom"); atomicOp!"+="(calls, 1); });
+    try
+    {
+        failing.get();
+        assert(false);
+    }
+    catch (Exception e)
+        assert(e.msg == "boom");
+    ui.process();
+    assert(atomicLoad(calls) == 2);
+
+    auto nothing = async(() {}, ui);
+    nothing.get();
+}
+

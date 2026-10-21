@@ -1,0 +1,260 @@
+# AppwriteD: Appwrite client SDK for D
+
+![API version](https://img.shields.io/badge/api%20version-2.5.0-blue.svg?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)
+
+Appwrite client SDK for the D programming language. Use it to connect desktop apps, games and UI toolkits written in D to an Appwrite server: accounts and sessions, databases, storage, functions, realtime and more.
+
+This is a **client** SDK: it connects as one of your app's end users, the way
+the Flutter, Web, Apple and Android SDKs do (sign up, sign in, read and write
+the data that user may access, subscribe to realtime events). For trusted
+server code holding an API key, use a server SDK instead.
+
+**This SDK targets Appwrite API 2.5.0.** It is generated from the
+official Appwrite API specification with the
+[Appwrite SDK generator](https://github.com/appwrite/sdk-generator); see
+[Regenerating](#regenerating) to build it for another server version.
+
+- No dependencies beyond Phobos and the system libcurl (which `std.net.curl` already uses)
+- Typed models (`models.User`, `models.Row`, ...) and enums (`enums.OAuthProvider`, ...)
+- Sessions persisted across restarts, OAuth2 sign-in through the system browser
+- Realtime subscriptions over WebSocket
+- Chunked, resumable file uploads with progress callbacks
+- `async` futures and a dispatcher, so a UI never blocks on the network
+
+## Installation
+
+Add the package to your `dub.json`:
+
+```json
+"dependencies": {
+    "appwrited": { "repository": "git+https://github.com/fhornsby/AppWriteD.git", "version": "<commit or tag>" }
+}
+```
+
+or, from a local checkout:
+
+```json
+"dependencies": {
+    "appwrited": { "path": "../AppWriteD" }
+}
+```
+
+Requires a D compiler with frontend 2.108 or newer (DMD 2.108+, LDC 1.38+),
+for named arguments. libcurl must be installed at run time: it is on every
+Linux distribution and macOS; on Windows, ship the `libcurl.dll` that comes with
+DMD and LDC next to your executable.
+
+## Getting started
+
+Create a project in the Appwrite console, then point a `Client` at it:
+
+```d
+import appwrite;
+
+auto client = new Client()
+    .setEndpoint("https://<REGION>.cloud.appwrite.io/v1") // or your self-hosted endpoint
+    .setProject("<PROJECT_ID>");
+
+// Keep users signed in between runs of your app
+// (~/.local/share/MyApp/appwrite-session.json on Linux, %APPDATA%\MyApp\... on Windows).
+client.setCookieStore(FileCookieStore.forApp("MyApp"));
+```
+
+Create one instance of each service you need and share it:
+
+```d
+auto account = new Account(client);
+auto tablesDB = new TablesDB(client);
+auto storage = new Storage(client);
+```
+
+Models live under `models.` and enums under `enums.`, as in the Flutter SDK.
+
+### Accounts and sessions
+
+```d
+// Sign up and sign in
+account.create(userId: ID.unique(), email: "ada@example.com", password: "correct horse battery");
+account.createEmailPasswordSession(email: "ada@example.com", password: "correct horse battery");
+
+models.User user = account.get();
+writeln("Signed in as ", user.name, " <", user.email, ">");
+
+// Sign out
+account.deleteSession(sessionId: "current");
+```
+
+The session is a cookie the server sets; the client stores it in its cookie
+jar and sends it with every request and with the realtime connection. With a
+`FileCookieStore` it survives restarts; `client.cookies.clear()` forgets it
+locally.
+
+### OAuth2 (Google, GitHub, ...)
+
+```d
+account.createOAuth2Session(provider: enums.OAuthProvider.github);
+writeln(account.get().name);
+```
+
+This opens the provider's sign-in page in the system browser and waits for the
+redirect on a temporary `http://localhost:<port>/` listener, the flow RFC 8252
+recommends for desktop apps. To show the page in your own web view instead,
+give the client an opener: `client.setUrlOpener((string url) { webView.load(url); });`.
+
+### Databases
+
+```d
+import std.json;
+
+// Create a row; `data` is a JSON object (serialize() turns structs and maps into one)
+struct Todo
+{
+    string title;
+    bool done;
+}
+
+auto row = tablesDB.createRow(
+    databaseId: "main",
+    tableId: "todos",
+    rowId: ID.unique(),
+    data: serialize(Todo("Buy milk", false)),
+    permissions: [Permission.read(Role.user(user.id)), Permission.update(Role.user(user.id))],
+);
+
+// Query rows
+auto page = tablesDB.listRows(databaseId: "main", tableId: "todos", queries: [
+    Query.equal("done", false),
+    Query.orderDesc("$createdAt"),
+    Query.limit(25),
+]);
+foreach (r; page.rows)
+{
+    writeln(r["title"].str);          // read a column from the raw JSON
+    Todo todo = r.convertTo!Todo;     // or convert the whole row to your own struct
+}
+```
+
+Optional parameters are named arguments with defaults; leave out the ones
+you don't need. Optional booleans are `Nullable!bool`, so pass them with
+`.nullable`:
+
+```d
+tablesDB.listRows(databaseId: "main", tableId: "todos", ttl: 60, total: false.nullable);
+```
+
+An optional array that is `null` is not sent, and `[]` is `null` in D: pass
+`emptyList!string` to send an explicitly empty list, for example to clear a
+row's permissions.
+
+### Storage
+
+```d
+auto file = storage.createFile(
+    bucketId: "photos",
+    fileId: ID.unique(),
+    file: InputFile.fromPath("holiday.jpg"),
+    onProgress: (UploadProgress p) { writefln("%.0f%%", p.progress); },
+);
+
+ubyte[] thumbnail = storage.getFilePreview(bucketId: "photos", fileId: file.id, width: 256);
+```
+
+Files over 5 MB are uploaded in chunks, and an interrupted upload with a
+known file ID resumes where it stopped.
+
+### Realtime
+
+```d
+auto realtime = new Realtime(client);
+auto subscription = realtime.subscribe(
+    Channel.tablesdb("main").table("todos").row(),
+    (RealtimeMessage message) {
+        auto todo = message.payloadAs!(models.Row);
+        writeln(message.events[0], ": ", todo["title"].str);
+    },
+);
+
+// later
+subscription.unsubscribe();
+realtime.disconnect();
+```
+
+The connection runs on a background thread, reconnects with back-off and
+re-subscribes automatically. `realtime.onError(...)` reports connection
+errors.
+
+### Errors
+
+Every failure throws `AppwriteException`, carrying the server's message, HTTP
+status `code`, error `type` and raw `response`:
+
+```d
+try
+    account.get();
+catch (AppwriteException e)
+    writeln(e.code, " ", e.type, ": ", e.msg); // 401 general_unauthorized_scope: ...
+```
+
+## Using it from a UI
+
+Service methods block until the server answers. In a GUI, run them with
+`async` and receive results on the UI thread through a `QueueDispatcher` that
+your event loop drains, much like awaiting a `Future` in Flutter:
+
+```d
+auto ui = new QueueDispatcher;
+setDefaultDispatcher(ui);                       // realtime callbacks use it too
+ui.setWakeup(() { toolkit.postEmptyEvent(); }); // optional: wake an idle event loop
+
+async(() => account.get())
+    .then((models.User user) { nameLabel.text = user.name; })
+    .onError((Exception e) { statusBar.text = e.msg; });
+
+// In your toolkit's main loop / frame callback, on the UI thread:
+ui.process();
+```
+
+`future.get()` blocks for the result when you do want to wait. The `Client`
+and services are safe to use from several threads at once.
+
+## API reference
+
+Every service method has a usage example under
+[`docs/examples`](docs/examples), and every module carries ddoc comments
+(`dub build --build=docs` renders them). The Appwrite documentation at
+https://appwrite.io/docs describes each endpoint; method and parameter names
+match the Flutter and Web SDKs.
+
+| Module | Contents |
+|--------|----------|
+| `appwrite.client` | `Client`, the connection: endpoint, project, headers, cookies |
+| `appwrite.services.*` | One class per API service: `Account`, `Analytics`, `Apps`, `Avatars`, `Databases`, `Functions`, `Graphql`, `Locale`, `Messaging`, `Oauth2`, `Organization`, `Presences`, `Storage`, `TablesDB`, `Teams` |
+| `appwrite.models` | Response models, imported as `models` |
+| `appwrite.enums` | Enumerations, imported as `enums` |
+| `appwrite.query`, `.permission`, `.role`, `.id`, `.operator`, `.channel` | Helpers for building queries, permissions, IDs, atomic updates and realtime channels |
+| `appwrite.realtime` | `Realtime` subscriptions |
+| `appwrite.async` | `async`, `Future`, `QueueDispatcher` |
+| `appwrite.cookies` | `CookieJar`, `CookieStore`, `FileCookieStore` |
+
+## Regenerating
+
+The code under `source/appwrite` is generated; change the templates in
+[`generator/`](generator) rather than the output. To regenerate (for a newer
+Appwrite release, or after editing templates):
+
+```sh
+cd generator
+composer install
+./generate.sh                         # API 2.5.0 by default
+./generate.sh --spec-version=2.4.x    # or another Appwrite API version
+```
+
+See [generator/README.md](generator/README.md) for details and for the
+end-to-end test suite.
+
+## License
+
+MIT; see [LICENSE](LICENSE). Appwrite is a trademark of Appwrite
+Code Ltd.; this SDK is a community project and is not affiliated with or
+endorsed by Appwrite.

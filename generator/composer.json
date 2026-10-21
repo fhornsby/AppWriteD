@@ -1,0 +1,33 @@
+{
+    "name": "appwrited/generator",
+    "description": "D language target for the Appwrite SDK generator",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.5",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "appwrite/sdk-generator": "dev-main#0955becea3dafa2741ef1929794cf4202973b4b9",
+        "symfony/polyfill-intl-normalizer": "^1.33"
+    },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/appwrite/sdk-generator"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "AppwriteD\\Generator\\": "src/"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true,
+        "platform": {
+            "php": "8.5"
+        }
+    }
+}

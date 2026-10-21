@@ -1,0 +1,8 @@
+{
+    "name": "e2e",
+    "description": "End-to-end test of the generated SDK against the sdk-generator mock server",
+    "targetType": "executable",
+    "dependencies": {
+        "appwrited": { "path": "../sdk" }
+    }
+}

@@ -1,0 +1,9 @@
+/// Response models. Import as `import models = appwrite.models;` (`import appwrite;` does this for you).
+module appwrite.models;
+
+{% for definitionName, definition in definitions %}
+public import appwrite.models.{{ definitionName | dModule }};
+{% endfor %}
+{% for requestModelName, requestModel in requestModels %}
+public import appwrite.models.{{ requestModelName | dModule }};
+{% endfor %}

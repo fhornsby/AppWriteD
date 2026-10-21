@@ -1,0 +1,142 @@
+{% verbatim %}module appwrite.input_file;
+
+/**
+ * A file to upload, read from disk or held in memory.
+ *
+ * ---
+ * storage.createFile(bucketId: "photos", fileId: ID.unique(), file: InputFile.fromPath("cat.png"));
+ * storage.createFile(bucketId: "photos", fileId: ID.unique(), file: InputFile.fromBytes(pixels, "cat.png", "image/png"));
+ * ---
+ */
+final class InputFile
+{
+    /// Path on disk, when the file is read from disk.
+    string path;
+    /// File contents, when the file is held in memory.
+    immutable(ubyte)[] bytes;
+    /// Name sent to the server.
+    string filename;
+    /// MIME type sent to the server.
+    string mimeType;
+
+    private this()
+    {
+    }
+
+    /// Upload the file at `path`. `filename` defaults to the path's base name.
+    static InputFile fromPath(string path, string filename = null, string mimeType = null)
+    {
+        import std.path : baseName;
+
+        auto file = new InputFile;
+        file.path = path;
+        file.filename = filename.length ? filename : baseName(path);
+        file.mimeType = mimeType.length ? mimeType : guessMimeType(file.filename);
+        return file;
+    }
+
+    /// Upload `bytes` under the name `filename`.
+    static InputFile fromBytes(const(ubyte)[] bytes, string filename, string mimeType = null)
+    {
+        auto file = new InputFile;
+        file.bytes = bytes.idup;
+        file.filename = filename;
+        file.mimeType = mimeType.length ? mimeType : guessMimeType(filename);
+        return file;
+    }
+
+    /// Upload `text` as a file named `filename`.
+    static InputFile fromString(string text, string filename, string mimeType = "text/plain")
+    {
+        return fromBytes(cast(const(ubyte)[]) text, filename, mimeType);
+    }
+
+    /// Size in bytes.
+    ulong size()
+    {
+        import std.file : getSize;
+
+        return path.length ? getSize(path) : bytes.length;
+    }
+
+    /// Read `length` bytes starting at `offset`.
+    ubyte[] read(ulong offset, size_t length)
+    {
+        if (!path.length)
+        {
+            auto end = offset + length > bytes.length ? bytes.length : cast(size_t)(offset + length);
+            return bytes[cast(size_t) offset .. end].dup;
+        }
+        import std.stdio : File;
+
+        auto file = File(path, "rb");
+        file.seek(offset);
+        auto buffer = new ubyte[length];
+        return file.rawRead(buffer);
+    }
+}
+
+/// A best-effort MIME type from a file name's extension.
+string guessMimeType(string filename)
+{
+    import std.path : extension;
+    import std.string : toLower;
+
+    switch (extension(filename).toLower)
+    {
+    case ".png":
+        return "image/png";
+    case ".jpg":
+    case ".jpeg":
+        return "image/jpeg";
+    case ".gif":
+        return "image/gif";
+    case ".webp":
+        return "image/webp";
+    case ".avif":
+        return "image/avif";
+    case ".heic":
+        return "image/heic";
+    case ".svg":
+        return "image/svg+xml";
+    case ".ico":
+        return "image/x-icon";
+    case ".bmp":
+        return "image/bmp";
+    case ".pdf":
+        return "application/pdf";
+    case ".json":
+        return "application/json";
+    case ".zip":
+        return "application/zip";
+    case ".gz":
+    case ".tgz":
+        return "application/gzip";
+    case ".txt":
+        return "text/plain";
+    case ".csv":
+        return "text/csv";
+    case ".html":
+    case ".htm":
+        return "text/html";
+    case ".css":
+        return "text/css";
+    case ".js":
+        return "text/javascript";
+    case ".mp3":
+        return "audio/mpeg";
+    case ".wav":
+        return "audio/wav";
+    case ".ogg":
+        return "audio/ogg";
+    case ".mp4":
+        return "video/mp4";
+    case ".webm":
+        return "video/webm";
+    case ".mov":
+        return "video/quicktime";
+    default:
+        return "application/octet-stream";
+    }
+}
+{% endverbatim %}

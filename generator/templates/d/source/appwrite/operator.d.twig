@@ -1,0 +1,212 @@
+{% verbatim %}/**
+ * Atomic update operators, passed as a column's value when updating a row:
+ *
+ * ---
+ * tablesDB.updateRow(databaseId: "main", tableId: "posts", rowId: id,
+ *     data: parseJSON(`{"views": ` ~ Operator.increment(1) ~ `}`));
+ * ---
+ */
+module appwrite.operator;
+
+import std.json : JSONValue;
+import std.math : isFinite;
+
+import appwrite.exception;
+import appwrite.json : serialize, toJSONString;
+
+/// Condition for `Operator.arrayFilter`.
+enum Condition : string
+{
+    equal = "equal",
+    notEqual = "notEqual",
+    greaterThan = "greaterThan",
+    greaterThanEqual = "greaterThanEqual",
+    lessThan = "lessThan",
+    lessThanEqual = "lessThanEqual",
+    contains = "contains",
+    isNull = "isNull",
+    isNotNull = "isNotNull",
+}
+
+/// Operator builders. Each returns the operator's JSON text.
+struct Operator
+{
+    @disable this();
+
+    /// Add `value`, never going above `max` when given.
+    static string increment(double value = 1, double max = double.nan)
+    {
+        return bounded("increment", value, max, "Value", "Max");
+    }
+
+    /// Subtract `value`, never going below `min` when given.
+    static string decrement(double value = 1, double min = double.nan)
+    {
+        return bounded("decrement", value, min, "Value", "Min");
+    }
+
+    /// Multiply by `factor`, never going above `max` when given.
+    static string multiply(double factor, double max = double.nan)
+    {
+        return bounded("multiply", factor, max, "Factor", "Max");
+    }
+
+    /// Divide by `divisor`, never going below `min` when given.
+    static string divide(double divisor, double min = double.nan)
+    {
+        if (divisor == 0)
+            throw new AppwriteException("Divisor cannot be zero");
+        return bounded("divide", divisor, min, "Divisor", "Min");
+    }
+
+    /// Replace the value with its remainder after dividing by `divisor`.
+    static string modulo(double divisor)
+    {
+        finite(divisor, "Divisor");
+        if (divisor == 0)
+            throw new AppwriteException("Divisor cannot be zero");
+        return build("modulo", "[" ~ number(divisor) ~ "]");
+    }
+
+    /// Raise to the power `exponent`, never going above `max` when given.
+    static string power(double exponent, double max = double.nan)
+    {
+        return bounded("power", exponent, max, "Exponent", "Max");
+    }
+
+    /// Append `values` to an array.
+    static string arrayAppend(T)(T[] values)
+    {
+        return build("arrayAppend", toJSONString(serialize(values)));
+    }
+
+    /// Prepend `values` to an array.
+    static string arrayPrepend(T)(T[] values)
+    {
+        return build("arrayPrepend", toJSONString(serialize(values)));
+    }
+
+    /// Insert `value` at `index` in an array.
+    static string arrayInsert(T)(long index, T value)
+    {
+        return build("arrayInsert", "[" ~ index.to!string ~ "," ~ toJSONString(serialize(value)) ~ "]");
+    }
+
+    /// Remove `value` from an array.
+    static string arrayRemove(T)(T value)
+    {
+        return build("arrayRemove", "[" ~ toJSONString(serialize(value)) ~ "]");
+    }
+
+    /// Remove duplicate values from an array.
+    static string arrayUnique()
+    {
+        return build("arrayUnique", "[]");
+    }
+
+    /// Keep only the values also in `values`.
+    static string arrayIntersect(T)(T[] values)
+    {
+        return build("arrayIntersect", toJSONString(serialize(values)));
+    }
+
+    /// Remove the values that are in `values`.
+    static string arrayDiff(T)(T[] values)
+    {
+        return build("arrayDiff", toJSONString(serialize(values)));
+    }
+
+    /// Keep the array values that satisfy `condition` (one that takes no value, like `isNull`).
+    static string arrayFilter(Condition condition)
+    {
+        return arrayFilter(condition, null);
+    }
+
+    /// Keep the array values that satisfy `condition` against `value`.
+    static string arrayFilter(T)(Condition condition, T value)
+    {
+        return build("arrayFilter", "[" ~ toJSONString(JSONValue(cast(string) condition)) ~ ","
+                ~ toJSONString(serialize(value)) ~ "]");
+    }
+
+    /// Append `value` to a string or array.
+    static string stringConcat(T)(T value)
+    {
+        return build("stringConcat", "[" ~ toJSONString(serialize(value)) ~ "]");
+    }
+
+    /// Replace each occurrence of `search` with `replace`.
+    static string stringReplace(string search, string replace)
+    {
+        return build("stringReplace", toJSONString(JSONValue([search, replace])));
+    }
+
+    /// Flip a boolean.
+    static string toggle()
+    {
+        return build("toggle", "[]");
+    }
+
+    /// Add `days` to a date.
+    static string dateAddDays(long days)
+    {
+        return build("dateAddDays", "[" ~ days.to!string ~ "]");
+    }
+
+    /// Subtract `days` from a date.
+    static string dateSubDays(long days)
+    {
+        return build("dateSubDays", "[" ~ days.to!string ~ "]");
+    }
+
+    /// Set a date to the current time.
+    static string dateSetNow()
+    {
+        return build("dateSetNow", "[]");
+    }
+
+    private static string bounded(string method, double value, double limit, string valueName, string limitName)
+    {
+        import std.math : isNaN;
+
+        finite(value, valueName);
+        auto values = "[" ~ number(value);
+        if (!isNaN(limit))
+        {
+            finite(limit, limitName);
+            values ~= "," ~ number(limit);
+        }
+        return build(method, values ~ "]");
+    }
+
+    private static void finite(double value, string name)
+    {
+        if (!isFinite(value))
+            throw new AppwriteException(name ~ " cannot be NaN or Infinity");
+    }
+
+    private static string number(double value)
+    {
+        import appwrite.json : formatNumber;
+
+        return formatNumber(value);
+    }
+
+    private static string build(string method, string values)
+    {
+        return `{"method":"` ~ method ~ `","values":` ~ values ~ "}";
+    }
+}
+
+private import std.conv : to;
+
+unittest
+{
+    assert(Operator.increment() == `{"method":"increment","values":[1]}`);
+    assert(Operator.increment(5, 100) == `{"method":"increment","values":[5,100]}`);
+    assert(Operator.arrayAppend(["a", "b"]) == `{"method":"arrayAppend","values":["a","b"]}`);
+    assert(Operator.arrayFilter(Condition.greaterThan, 3) == `{"method":"arrayFilter","values":["greaterThan",3]}`);
+    assert(Operator.arrayFilter(Condition.isNull) == `{"method":"arrayFilter","values":["isNull",null]}`);
+    assert(Operator.toggle() == `{"method":"toggle","values":[]}`);
+}
+{% endverbatim %}

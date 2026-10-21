@@ -1,0 +1,996 @@
+/**
+ * The connection to an Appwrite server.
+ *
+ * ---
+ * auto client = new Client()
+ *     .setEndpoint("https://<REGION>.cloud.appwrite.io/v1")
+ *     .setProject("<PROJECT_ID>");
+ * ---
+ *
+ * A `Client` is safe to share between threads. Requests are synchronous; see
+ * `appwrite.async` to run them off a UI thread.
+ */
+module appwrite.client;
+
+import core.sync.mutex : Mutex;
+import core.time : Duration, minutes, seconds;
+import std.array : appender, join, replace;
+import std.conv : to;
+import std.json;
+import std.string : indexOf, startsWith, strip, toLower;
+import std.uri : encodeComponent;
+
+import appwrite.cookies;
+import appwrite.exception;
+import appwrite.input_file;
+import appwrite.json : serialize, toJSONString;
+import appwrite.upload_progress;
+
+/// HTTP request method.
+enum HttpMethod : string
+{
+    get = "GET",
+    post = "POST",
+    put = "PUT",
+    patch = "PATCH",
+    delete_ = "DELETE",
+    head = "HEAD",
+}
+
+/// How a response body is decoded.
+enum ResponseType
+{
+    /// Parse JSON responses into `Response.json`.
+    json,
+    /// Keep the body as text.
+    plain,
+    /// Keep the body as raw bytes.
+    bytes,
+}
+
+/// A response from the server.
+struct Response
+{
+    /// HTTP status code.
+    int status;
+    /// Response headers, keyed by lower-case name.
+    string[string] headers;
+    /// Raw response body.
+    ubyte[] bytes;
+    /// Parsed body, when the server sent JSON and `ResponseType.json` was requested.
+    JSONValue json;
+
+    /// The body as text.
+    string text() const
+    {
+        return cast(string) bytes.idup;
+    }
+}
+
+/// Opens a URL for the user, e.g. in the system browser. Used by OAuth2 sign-in.
+alias UrlOpener = void delegate(string url);
+
+/// Receives warnings the server attaches to responses (`X-Appwrite-Warning`).
+alias WarningHandler = void delegate(string warning);
+
+/// The connection to an Appwrite server. See the module documentation.
+class Client
+{
+    /// Uploads larger than this are sent in chunks of this size.
+    enum size_t chunkSize = 5 * 1024 * 1024;
+
+    private
+    {
+        string _endpoint;
+        string _endpointRealtime;
+        bool _selfSigned;
+        string[string] _headers;
+        string[string] _config;
+        CookieJar _cookies;
+        Mutex _lock;
+        UrlOpener _urlOpener;
+        WarningHandler _warningHandler;
+        Duration _connectTimeout = 30.seconds;
+        Duration _dataTimeout = 2.minutes;
+        Duration _authTimeout = 5.minutes;
+    }
+
+    this(string endpoint = "https://cloud.appwrite.io/v1", bool selfSigned = false)
+    {
+        _lock = new Mutex;
+        _cookies = new CookieJar;
+        _selfSigned = selfSigned;
+        _headers = [
+            "x-sdk-name": "AppwriteD",
+            "x-sdk-platform": "client",
+            "x-sdk-language": "d",
+            "x-sdk-version": "0.1.0",
+            "X-Appwrite-Response-Format": "2.5.0",
+        ];
+        _headers["User-Agent"] = "AppwriteD/0.1.0 (" ~ platformName ~ ")";
+        setEndpoint(endpoint);
+    }
+
+    /// Your project ID
+    Client setProject(string value)
+    {
+        setConfig("project", value);
+        return this;
+    }
+
+    /// Your secret JSON Web Token
+    Client setJWT(string value)
+    {
+        setConfig("jwt", value);
+        addHeader("X-Appwrite-JWT", value);
+        return this;
+    }
+
+    /// The OAuth access token to authenticate with
+    Client setBearer(string value)
+    {
+        setConfig("bearer", value);
+        addHeader("Authorization", "Bearer " ~ value);
+        return this;
+    }
+
+    Client setLocale(string value)
+    {
+        setConfig("locale", value);
+        addHeader("X-Appwrite-Locale", value);
+        return this;
+    }
+
+    /// The user session to authenticate with
+    Client setSession(string value)
+    {
+        setConfig("session", value);
+        addHeader("X-Appwrite-Session", value);
+        return this;
+    }
+
+    /// The user cookie to authenticate with. Used by SDKs that forward an incoming
+    /// Cookie header in server-side runtimes.
+    Client setCookie(string value)
+    {
+        setConfig("cookie", value);
+        addHeader("Cookie", value);
+        return this;
+    }
+
+    /// Impersonate a user by ID
+    Client setImpersonateUserId(string value)
+    {
+        setConfig("impersonateuserid", value);
+        addHeader("X-Appwrite-Impersonate-User-Id", value);
+        return this;
+    }
+
+    /// Impersonate a user by email
+    Client setImpersonateUserEmail(string value)
+    {
+        setConfig("impersonateuseremail", value);
+        addHeader("X-Appwrite-Impersonate-User-Email", value);
+        return this;
+    }
+
+    /// Impersonate a user by phone
+    Client setImpersonateUserPhone(string value)
+    {
+        setConfig("impersonateuserphone", value);
+        addHeader("X-Appwrite-Impersonate-User-Phone", value);
+        return this;
+    }
+
+    /// Set the API endpoint, e.g. `https://fra.cloud.appwrite.io/v1`. Also resets the realtime endpoint.
+    Client setEndpoint(string endpoint)
+    {
+        if (!endpoint.startsWith("http://") && !endpoint.startsWith("https://"))
+            throw new AppwriteException("Invalid endpoint URL: " ~ endpoint);
+        synchronized (_lock)
+        {
+            _endpoint = endpoint;
+            _endpointRealtime = endpoint.replace("https://", "wss://").replace("http://", "ws://");
+        }
+        return this;
+    }
+
+    /// Set the realtime endpoint, e.g. `wss://fra.cloud.appwrite.io/v1`.
+    Client setEndpointRealtime(string endpoint)
+    {
+        if (!endpoint.startsWith("ws://") && !endpoint.startsWith("wss://"))
+            throw new AppwriteException("Invalid realtime endpoint URL: " ~ endpoint);
+        synchronized (_lock)
+            _endpointRealtime = endpoint;
+        return this;
+    }
+
+    /// Accept self-signed TLS certificates. Only use this against a development server.
+    Client setSelfSigned(bool status = true)
+    {
+        synchronized (_lock)
+            _selfSigned = status;
+        return this;
+    }
+
+    /**
+     * Send an `Origin` header with every request.
+     *
+     * Not needed by default: Appwrite accepts requests without one. Set it if
+     * your project should only accept clients registered as a platform.
+     */
+    Client setOrigin(string origin)
+    {
+        return addHeader("Origin", origin);
+    }
+
+    /**
+     * Identify the app as a native platform registered in the Appwrite
+     * console, e.g. `setAppId("com.example.notes")` sends
+     * `Origin: appwrite-linux://com.example.notes` on Linux.
+     */
+    Client setAppId(string appId)
+    {
+        version (Windows)
+            enum scheme = "appwrite-windows";
+        else version (OSX)
+            enum scheme = "appwrite-macos";
+        else version (iOS)
+            enum scheme = "appwrite-ios";
+        else version (Android)
+            enum scheme = "appwrite-android";
+        else
+            enum scheme = "appwrite-linux";
+        return setOrigin(scheme ~ "://" ~ appId);
+    }
+
+    /// Add a header sent with every request.
+    Client addHeader(string key, string value)
+    {
+        synchronized (_lock)
+            _headers[key] = value;
+        return this;
+    }
+
+    /// The headers sent with every request.
+    string[string] getHeaders()
+    {
+        synchronized (_lock)
+            return _headers.dup;
+    }
+
+    /// A configuration value set through a `set...` method, e.g. `config("project")`.
+    string config(string key)
+    {
+        synchronized (_lock)
+        {
+            if (auto value = key.toLower in _config)
+                return *value;
+            return "";
+        }
+    }
+
+    /// Store a configuration value.
+    Client setConfig(string key, string value)
+    {
+        synchronized (_lock)
+            _config[key.toLower] = value;
+        return this;
+    }
+
+    /// The API endpoint.
+    string endpoint()
+    {
+        synchronized (_lock)
+            return _endpoint;
+    }
+
+    /// The realtime endpoint.
+    string endpointRealtime()
+    {
+        synchronized (_lock)
+            return _endpointRealtime;
+    }
+
+    /// Whether self-signed certificates are accepted.
+    bool selfSigned()
+    {
+        synchronized (_lock)
+            return _selfSigned;
+    }
+
+    /// The cookies holding the user's session.
+    CookieJar cookies()
+    {
+        return _cookies;
+    }
+
+    /// Keep session cookies in `store`, e.g. a `FileCookieStore`, so users stay signed in across restarts.
+    Client setCookieStore(CookieStore store)
+    {
+        _cookies.setStore(store);
+        return this;
+    }
+
+    /// How OAuth2 sign-in opens the provider's page. Defaults to the system browser.
+    Client setUrlOpener(UrlOpener opener)
+    {
+        synchronized (_lock)
+            _urlOpener = opener;
+        return this;
+    }
+
+    /// Where server warnings go. Defaults to standard error.
+    Client setWarningHandler(WarningHandler handler)
+    {
+        synchronized (_lock)
+            _warningHandler = handler;
+        return this;
+    }
+
+    /// Time allowed to connect, and to wait between bytes of a response.
+    Client setTimeout(Duration connect, Duration data = 2.minutes)
+    {
+        synchronized (_lock)
+        {
+            _connectTimeout = connect;
+            _dataTimeout = data;
+        }
+        return this;
+    }
+
+    /// How long OAuth2 sign-in waits for the user to finish in the browser.
+    Client setAuthTimeout(Duration timeout)
+    {
+        synchronized (_lock)
+            _authTimeout = timeout;
+        return this;
+    }
+
+    /// Send a ping to project as part of onboarding.
+    string ping()
+    {
+        string[string] apiHeaders = [
+            "X-Appwrite-Project": config("project"),
+            "accept": "application/json",
+        ];
+        return call(HttpMethod.get, "/ping", apiHeaders, null, ResponseType.plain).text;
+    }
+
+
+    /**
+     * Send a request.
+     *
+     * `params` go in the query string for GET requests, and in the body
+     * otherwise, as JSON or as multipart form fields depending on the
+     * `content-type` header. Throws `AppwriteException` when the server
+     * answers with an error or the request cannot be sent.
+     */
+    Response call(HttpMethod method, string path, string[string] headers = null,
+        JSONValue[string] params = null, ResponseType responseType = ResponseType.json)
+    {
+        return send(method, path, headers, params, null, responseType);
+    }
+
+    /**
+     * Upload a file, in chunks when it is larger than `chunkSize`.
+     *
+     * `idParamName` names the parameter holding the file's ID, used to resume
+     * an upload that was interrupted.
+     */
+    Response chunkedUpload(HttpMethod method, string path, string[string] headers,
+        JSONValue[string] params, string paramName, string idParamName, InputFile file,
+        UploadProgressCallback onProgress = null, ResponseType responseType = ResponseType.json)
+    {
+        if (file is null)
+            return call(method, path, headers, params, responseType);
+
+        immutable size = file.size;
+        // Only POST uploads can be resumed in chunks; anything else goes in one request.
+        if (size <= chunkSize || responseType == ResponseType.plain || method != HttpMethod.post)
+        {
+            auto part = FilePart(paramName, file.filename, file.mimeType, file.read(0, cast(size_t) size));
+            return send(method, path, headers, params, [part], responseType);
+        }
+
+        ulong offset;
+        string uploadId;
+        Response response;
+        if (idParamName.length)
+        {
+            if (auto id = idParamName in params)
+            {
+                if (id.type == JSONType.string && id.str.length && id.str != "unique()")
+                {
+                    // Resume: ask how many chunks of this file the server already has.
+                    try
+                    {
+                        response = call(HttpMethod.get, path ~ "/" ~ encodeComponent(id.str), headers);
+                        offset = cast(ulong) jsonLong(response.json, "chunksUploaded") * chunkSize;
+                        uploadId = id.str;
+                    }
+                    catch (AppwriteException)
+                    {
+                    }
+                }
+            }
+        }
+        if (offset >= size)
+            return response;
+
+        immutable totalChunks = cast(long)((size + chunkSize - 1) / chunkSize);
+        while (offset < size)
+        {
+            immutable end = offset + chunkSize < size ? offset + chunkSize : size;
+            auto chunkHeaders = headers.dup;
+            chunkHeaders["content-range"] = "bytes " ~ offset.to!string ~ "-" ~ (end - 1).to!string ~ "/" ~ size.to!string;
+            if (uploadId.length)
+                chunkHeaders["x-appwrite-id"] = uploadId;
+
+            auto part = FilePart(paramName, file.filename, file.mimeType, file.read(offset, cast(size_t)(end - offset)));
+            response = send(method, path, chunkHeaders, params, [part], responseType);
+            if (response.json.type == JSONType.object)
+                if (auto id = "$id" in response.json)
+                    if (id.type == JSONType.string)
+                        uploadId = id.str;
+
+            offset = end;
+            if (onProgress !is null)
+                onProgress(UploadProgress(uploadId, cast(double) offset / size * 100.0, offset,
+                        totalChunks, cast(long)((offset + chunkSize - 1) / chunkSize)));
+        }
+        return response;
+    }
+
+    /**
+     * Run an OAuth2 flow in the system browser and wait for it to finish.
+     *
+     * The provider redirects back to a short-lived HTTP listener on the
+     * loopback interface, the same way the Flutter SDK signs in on desktop.
+     * For an OAuth2 session the returned secret is exchanged for a session
+     * cookie before this returns. Returns the URL the browser was sent back
+     * to, which carries `userId` and `secret` for token flows.
+     */
+    string webAuth(string url)
+    {
+        import appwrite.oauth : LoopbackListener, parseQuery, withQuery;
+
+        enum sessionPath = "/account/sessions/oauth2/";
+        enum tokenPath = "/account/tokens/oauth2/";
+
+        UrlOpener opener;
+        Duration timeout;
+        synchronized (_lock)
+        {
+            opener = _urlOpener;
+            timeout = _authTimeout;
+        }
+
+        auto listener = new LoopbackListener;
+        scope (exit)
+            listener.close();
+        auto callback = listener.url;
+
+        auto exchange = url.indexOf(sessionPath) >= 0;
+        auto target = exchange ? url.replace(sessionPath, tokenPath) : url;
+        target = withQuery(target, ["success": callback, "failure": callback]);
+
+        if (opener !is null)
+            opener(target);
+        else
+        {
+            import std.process : browse;
+
+            browse(target);
+        }
+
+        auto result = listener.wait(timeout);
+        auto query = parseQuery(result);
+        if (auto error = "error" in query)
+            throw callbackError(*error);
+
+        if (exchange)
+        {
+            auto userId = "userId" in query;
+            auto secret = "secret" in query;
+            if (userId is null || secret is null)
+                throw new AppwriteException("Invalid OAuth2 response: userId and secret not available.", 500);
+            call(HttpMethod.post, "/account/sessions/token", [
+                "X-Appwrite-Project": config("project"),
+                "content-type": "application/json",
+            ], [
+                "userId": JSONValue(*userId),
+                "secret": JSONValue(*secret),
+            ]);
+        }
+        else if (auto key = "key" in query)
+        {
+            if (auto secret = "secret" in query)
+            {
+                Cookie cookie;
+                cookie.name = *key;
+                cookie.value = *secret;
+                cookie.domain = hostOf(endpoint);
+                _cookies.put(cookie);
+            }
+        }
+        return result;
+    }
+
+    private struct FilePart
+    {
+        string name;
+        string filename;
+        string mimeType;
+        ubyte[] data;
+    }
+
+    private Response send(HttpMethod method, string path, string[string] headers,
+        JSONValue[string] params, FilePart[] files, ResponseType responseType)
+    {
+        import std.net.curl : CurlException, CurlOption, HTTP;
+
+        string endpointUrl;
+        string[string] allHeaders;
+        bool insecure;
+        Duration connectTimeout, dataTimeout;
+        WarningHandler warningHandler;
+        synchronized (_lock)
+        {
+            endpointUrl = _endpoint;
+            allHeaders = _headers.dup;
+            insecure = _selfSigned;
+            connectTimeout = _connectTimeout;
+            dataTimeout = _dataTimeout;
+            warningHandler = _warningHandler;
+        }
+        foreach (key, value; headers)
+        {
+            // Request headers replace client headers of the same name, whatever the case.
+            foreach (existing; allHeaders.keys)
+                if (existing.toLower == key.toLower)
+                    allHeaders.remove(existing);
+            allHeaders[key] = value;
+        }
+
+        string contentType;
+        foreach (key, value; allHeaders)
+            if (key.toLower == "content-type")
+                contentType = value;
+
+        auto url = endpointUrl ~ path;
+        ubyte[] payload;
+        bool hasBody;
+        if (method == HttpMethod.get || method == HttpMethod.head)
+        {
+            auto query = buildQuery(params);
+            if (query.length)
+                url ~= (url.indexOf('?') >= 0 ? "&" : "?") ~ query;
+        }
+        else if (contentType.startsWith("multipart/form-data"))
+        {
+            auto boundary = "----AppwriteDBoundary" ~ randomToken();
+            payload = buildMultipart(boundary, params, files);
+            contentType = "multipart/form-data; boundary=" ~ boundary;
+            hasBody = true;
+        }
+        else
+        {
+            payload = cast(ubyte[]) toJSONString(JSONValue(params is null ? (JSONValue[string]).init : params)).dup;
+            if (contentType.length == 0)
+                contentType = "application/json";
+            hasBody = true;
+        }
+
+        auto host = hostOf(endpointUrl);
+        auto secure = endpointUrl.startsWith("https://");
+        auto cookieHeader = _cookies.headerFor(host, pathOf(url), secure);
+
+        auto http = HTTP(url);
+        http.connectTimeout = connectTimeout;
+        http.dataTimeout = dataTimeout;
+        http.clearRequestHeaders();
+        foreach (key, value; allHeaders)
+        {
+            auto lower = key.toLower;
+            if (lower == "content-type")
+                continue;
+            if (lower == "cookie" && cookieHeader.length)
+            {
+                cookieHeader = value ~ "; " ~ cookieHeader;
+                continue;
+            }
+            http.addRequestHeader(key, sanitizeHeader(value));
+        }
+        if (cookieHeader.length)
+            http.addRequestHeader("Cookie", cookieHeader);
+        // libcurl adds `Expect: 100-continue` to large bodies; it only costs a round trip here.
+        http.addRequestHeader("Expect", "");
+        if (insecure)
+        {
+            http.handle.set(CurlOption.ssl_verifypeer, 0);
+            http.handle.set(CurlOption.ssl_verifyhost, 0);
+        }
+
+        if (hasBody)
+        {
+            http.setPostData(payload, contentType);
+            if (method != HttpMethod.post)
+                http.handle.set(CurlOption.customrequest, cast(string) method);
+        }
+        else if (method == HttpMethod.head)
+        {
+            http.method = HTTP.Method.head;
+        }
+        else
+        {
+            http.method = HTTP.Method.get;
+        }
+
+        Response response;
+        auto received = appender!(ubyte[]);
+        string[] setCookies;
+        http.onReceiveHeader = (in char[] key, in char[] value) {
+            auto name = key.idup.toLower;
+            auto text = value.idup;
+            if (name == "set-cookie")
+                setCookies ~= text;
+            response.headers[name] = text;
+        };
+        http.onReceiveStatusLine = (HTTP.StatusLine line) {
+            // Headers of an interim or redirected response do not describe the final one.
+            response.headers = null;
+        };
+        http.onReceive = (ubyte[] data) { received.put(data); return data.length; };
+
+        try
+            http.perform();
+        catch (CurlException e)
+        {
+            throw new AppwriteException(e.msg);
+        }
+
+        response.status = http.statusLine.code;
+        response.bytes = received.data;
+
+        foreach (header; setCookies)
+            _cookies.setFromHeader(header, host);
+        if (auto fallback = "x-fallback-cookies" in response.headers)
+            storeFallbackCookies(*fallback, host);
+        if (auto warnings = "x-appwrite-warning" in response.headers)
+        {
+            import std.algorithm : splitter;
+
+            foreach (warning; (*warnings).splitter(';'))
+            {
+                if (warningHandler !is null)
+                    warningHandler(warning.strip);
+                else
+                {
+                    import std.stdio : stderr;
+
+                    stderr.writeln("Warning: ", warning.strip);
+                }
+            }
+        }
+
+        auto responseContentType = "content-type" in response.headers;
+        auto isJson = responseContentType !is null && (*responseContentType).indexOf("application/json") >= 0;
+
+        if (response.status >= 400)
+        {
+            auto text = response.text;
+            if (isJson && text.length)
+            {
+                try
+                {
+                    auto error = parseJSON(text);
+                    auto message = "message" in error;
+                    auto type = "type" in error;
+                    throw new AppwriteException(
+                        message !is null && message.type == JSONType.string ? message.str : text,
+                        cast(int) jsonLong(error, "code", response.status),
+                        type !is null && type.type == JSONType.string ? type.str : null,
+                        text);
+                }
+                catch (JSONException)
+                {
+                }
+            }
+            throw new AppwriteException(text.length ? text
+                    : "Unexpected empty response with status " ~ response.status.to!string,
+                response.status, null, text);
+        }
+
+        if (responseType == ResponseType.json && isJson && response.bytes.length)
+        {
+            try
+                response.json = parseJSON(response.text);
+            catch (JSONException e)
+                throw new AppwriteException("Invalid JSON response: " ~ e.msg, response.status, null, response.text);
+        }
+        return response;
+    }
+
+    private void storeFallbackCookies(string header, string host)
+    {
+        try
+        {
+            auto json = parseJSON(header);
+            if (json.type != JSONType.object)
+                return;
+            foreach (name, value; json.object)
+            {
+                if (value.type != JSONType.string)
+                    continue;
+                // A real Set-Cookie for the same name wins: it carries the expiry.
+                if (_cookies.get(name, host) !is null)
+                    continue;
+                Cookie cookie;
+                cookie.name = name;
+                cookie.value = value.str;
+                cookie.domain = host;
+                _cookies.put(cookie);
+            }
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private static AppwriteException callbackError(string error)
+    {
+        try
+        {
+            auto json = parseJSON(error);
+            if (json.type == JSONType.object)
+            {
+                auto message = "message" in json;
+                auto type = "type" in json;
+                return new AppwriteException(
+                    message !is null && message.type == JSONType.string ? message.str : error,
+                    cast(int) jsonLong(json, "code"),
+                    type !is null && type.type == JSONType.string ? type.str : null,
+                    error);
+            }
+        }
+        catch (Exception)
+        {
+        }
+        return new AppwriteException(error);
+    }
+}
+
+/// Operating system and CPU, for the User-Agent header.
+private string platformName()
+{
+    version (Windows)
+        enum os = "Windows";
+    else version (OSX)
+        enum os = "macOS";
+    else version (linux)
+        enum os = "Linux";
+    else version (FreeBSD)
+        enum os = "FreeBSD";
+    else version (Android)
+        enum os = "Android";
+    else
+        enum os = "Unknown";
+    version (X86_64)
+        enum arch = "x86_64";
+    else version (AArch64)
+        enum arch = "arm64";
+    else version (X86)
+        enum arch = "x86";
+    else
+        enum arch = "other";
+    return os ~ "; " ~ arch;
+}
+
+/// Encode request parameters as a query string, `name[]=` for lists and `name[key]=` for objects.
+package(appwrite) string buildQuery(JSONValue[string] params)
+{
+    import std.algorithm : sort;
+
+    string[] parts;
+    foreach (key; params.keys.sort)
+        appendQuery(parts, key, params[key]);
+    return parts.join("&");
+}
+
+private void appendQuery(ref string[] parts, string key, JSONValue value)
+{
+    final switch (value.type)
+    {
+    case JSONType.null_:
+        return;
+    case JSONType.array:
+        foreach (item; value.array)
+        {
+            if (item.type == JSONType.null_)
+                continue;
+            parts ~= encodeComponent(key ~ "[]") ~ "=" ~ encodeComponent(scalarText(item));
+        }
+        return;
+    case JSONType.object:
+        foreach (child, item; value.object)
+            appendQuery(parts, key ~ "[" ~ child ~ "]", item);
+        return;
+    case JSONType.string:
+    case JSONType.integer:
+    case JSONType.uinteger:
+    case JSONType.float_:
+    case JSONType.true_:
+    case JSONType.false_:
+        parts ~= encodeComponent(key) ~ "=" ~ encodeComponent(scalarText(value));
+        return;
+    }
+}
+
+/// A JSON value as a form or query string value.
+package(appwrite) string scalarText(JSONValue value)
+{
+    switch (value.type)
+    {
+    case JSONType.string:
+        return value.str;
+    case JSONType.true_:
+        return "true";
+    case JSONType.false_:
+        return "false";
+    case JSONType.null_:
+        return "";
+    default:
+        return toJSONString(value);
+    }
+}
+
+private ubyte[] buildMultipart(T)(string boundary, JSONValue[string] params, T[] files)
+{
+    import std.algorithm : sort;
+
+    auto output = appender!(ubyte[]);
+    void field(string name, string value)
+    {
+        output.put(cast(const(ubyte)[]) ("--" ~ boundary ~ "\r\nContent-Disposition: form-data; name=\""
+                ~ escapeQuoted(name) ~ "\"\r\n\r\n" ~ value ~ "\r\n"));
+    }
+
+    foreach (key; params.keys.sort)
+    {
+        auto value = params[key];
+        switch (value.type)
+        {
+        case JSONType.null_:
+            break;
+        case JSONType.array:
+            foreach (i, item; value.array)
+                if (item.type != JSONType.null_)
+                    field(key ~ "[" ~ i.to!string ~ "]", scalarText(item));
+            break;
+        case JSONType.object:
+            field(key, toJSONString(value));
+            break;
+        default:
+            field(key, scalarText(value));
+            break;
+        }
+    }
+    foreach (file; files)
+    {
+        output.put(cast(const(ubyte)[]) ("--" ~ boundary ~ "\r\nContent-Disposition: form-data; name=\""
+                ~ escapeQuoted(file.name) ~ "\"; filename=\"" ~ escapeQuoted(file.filename)
+                ~ "\"\r\nContent-Type: " ~ (file.mimeType.length ? file.mimeType : "application/octet-stream")
+                ~ "\r\n\r\n"));
+        output.put(file.data);
+        output.put(cast(const(ubyte)[]) "\r\n");
+    }
+    output.put(cast(const(ubyte)[]) ("--" ~ boundary ~ "--\r\n"));
+    return output.data;
+}
+
+private string escapeQuoted(string value)
+{
+    return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "").replace("\n", "");
+}
+
+/// Header values must not contain line breaks, and must be ASCII for some servers.
+private string sanitizeHeader(string value)
+{
+    import std.uri : encode;
+
+    foreach (char c; value)
+        if (c >= 0x80 || c == '\r' || c == '\n')
+            return encode(value.replace("\r", "").replace("\n", ""));
+    return value;
+}
+
+/// The host of a URL, lower-cased and without a port.
+package(appwrite) string hostOf(string url)
+{
+    auto rest = url;
+    auto scheme = rest.indexOf("://");
+    if (scheme >= 0)
+        rest = rest[scheme + 3 .. $];
+    foreach (i, c; rest)
+        if (c == '/' || c == '?' || c == '#')
+        {
+            rest = rest[0 .. i];
+            break;
+        }
+    auto at = rest.indexOf('@');
+    if (at >= 0)
+        rest = rest[at + 1 .. $];
+    if (rest.startsWith("["))
+    {
+        auto close = rest.indexOf(']');
+        return close > 0 ? rest[0 .. close + 1].toLower : rest.toLower;
+    }
+    auto colon = rest.indexOf(':');
+    return (colon >= 0 ? rest[0 .. colon] : rest).toLower;
+}
+
+private string pathOf(string url)
+{
+    auto scheme = url.indexOf("://");
+    auto rest = scheme >= 0 ? url[scheme + 3 .. $] : url;
+    auto slash = rest.indexOf('/');
+    if (slash < 0)
+        return "/";
+    auto path = rest[slash .. $];
+    auto query = path.indexOf('?');
+    return query >= 0 ? path[0 .. query] : path;
+}
+
+private long jsonLong(JSONValue json, string key, long fallback = 0)
+{
+    if (json.type != JSONType.object)
+        return fallback;
+    if (auto value = key in json)
+    {
+        switch (value.type)
+        {
+        case JSONType.integer:
+            return value.integer;
+        case JSONType.uinteger:
+            return cast(long) value.uinteger;
+        case JSONType.float_:
+            return cast(long) value.floating;
+        case JSONType.string:
+            try
+                return value.str.to!long;
+            catch (Exception)
+                return fallback;
+        default:
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+/// Random hex characters, for multipart boundaries and IDs.
+package(appwrite) string randomToken(size_t length = 16)
+{
+    import std.random : uniform;
+
+    static immutable digits = "0123456789abcdef";
+    auto result = new char[length];
+    foreach (ref c; result)
+        c = digits[uniform(0, 16)];
+    return cast(string) result;
+}
+
+unittest
+{
+    assert(hostOf("https://Cloud.Appwrite.io:443/v1") == "cloud.appwrite.io");
+    assert(hostOf("http://[::1]:8080/v1") == "[::1]");
+    assert(pathOf("https://a.b/v1/account?x=1") == "/v1/account");
+    auto query = buildQuery([
+        "queries": JSONValue(["a&b", "c"]),
+        "limit": JSONValue(5),
+        "flag": JSONValue(true),
+        "skip": JSONValue(null),
+    ]);
+    assert(query == "flag=true&limit=5&queries%5B%5D=a%26b&queries%5B%5D=c", query);
+}
+

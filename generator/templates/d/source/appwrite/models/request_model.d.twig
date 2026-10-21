@@ -1,0 +1,39 @@
+{% set typeName = requestModelName | dTypeName %}
+module appwrite.models.{{ requestModelName | dModule }};
+
+import std.json : JSONValue;
+import std.typecons : Nullable;
+
+import appwrite.json;
+import enums = appwrite.enums;
+import models = appwrite.models;
+
+{{ (requestModel.description ?: (requestModelName | caseUcfirst)) | dDoc }}struct {{ typeName }}
+{
+{% for property in requestModel.properties %}
+{% set required = property | schemaRequired %}
+{% set default = property | dFieldDefault(required, spec) %}
+{{ property.description | dDoc(4) }}    @jsonKey({{ (property | schemaName) | dString }}) {{ property | dFieldType(required, spec) }} {{ (property | schemaName) | dFieldName }}{% if default %} = {{ default | raw }}{% endif %};
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}
+
+    /// Parse a `{{ typeName }}` from JSON.
+    static {{ typeName }} fromJson(JSONValue json)
+    {
+        return deserialize!({{ typeName }})(json);
+    }
+
+    /// Convert to JSON.
+    JSONValue toJson()
+    {
+        return serialize(this);
+    }
+
+    /// JSON text of this model.
+    string toString()
+    {
+        return toJSONString(toJson());
+    }
+}

@@ -1,0 +1,438 @@
+{% verbatim %}/**
+ * Session cookies.
+ *
+ * Appwrite keeps a signed-in user's session in a cookie
+ * (`a_session_<projectId>`). The client stores the cookies the server sets and
+ * sends them back on later requests and on the realtime connection, the same
+ * way a browser or the Flutter SDK does.
+ *
+ * By default cookies live in memory, so a session ends with the process. Give
+ * the client a `FileCookieStore` (or your own `CookieStore`) to keep users
+ * signed in across restarts:
+ *
+ * ---
+ * client.setCookieStore(new FileCookieStore(appDataDir ~ "/appwrite-cookies.json"));
+ * ---
+ */
+module appwrite.cookies;
+
+import core.sync.mutex : Mutex;
+import std.algorithm : endsWith, startsWith;
+import std.datetime.systime : Clock, SysTime;
+import std.json;
+import std.string : indexOf, strip, toLower;
+
+/// One stored cookie.
+struct Cookie
+{
+    string name;
+    string value;
+    /// Host or domain the cookie belongs to, without a leading dot.
+    string domain;
+    string path = "/";
+    /// Expiry as Unix time in seconds; 0 for a session cookie.
+    long expires;
+    bool secure;
+    /// True when the domain came from a `Domain` attribute, so subdomains match too.
+    bool hostOnly = true;
+
+    bool expired(long now) const @safe pure nothrow
+    {
+        return expires != 0 && expires <= now;
+    }
+}
+
+/// Where a `CookieJar` keeps its cookies between runs.
+interface CookieStore
+{
+    /// Return the text previously given to `save`, or null when there is none.
+    string load();
+    /// Persist the jar's serialized state.
+    void save(string data);
+}
+
+/// Keeps cookies in memory only. This is the default.
+class MemoryCookieStore : CookieStore
+{
+    private string data;
+
+    string load()
+    {
+        return data;
+    }
+
+    void save(string data)
+    {
+        this.data = data;
+    }
+}
+
+/**
+ * Keeps cookies in a JSON file. The file holds session secrets, so put it
+ * somewhere only the current user can read (it is created with mode 0600 on
+ * POSIX systems).
+ */
+class FileCookieStore : CookieStore
+{
+    private string path;
+
+    this(string path)
+    {
+        this.path = path;
+    }
+
+    /**
+     * A store in the per-user application data folder for `appName`:
+     * `$XDG_DATA_HOME/<appName>` (or `~/.local/share/<appName>`) on Linux,
+     * `~/Library/Application Support/<appName>` on macOS and
+     * `%APPDATA%\<appName>` on Windows.
+     */
+    static FileCookieStore forApp(string appName, string fileName = "appwrite-session.json")
+    {
+        import std.path : buildPath;
+
+        return new FileCookieStore(buildPath(appDataDir(appName), fileName));
+    }
+
+    string load()
+    {
+        import std.file : exists, readText;
+
+        try
+            return exists(path) ? readText(path) : null;
+        catch (Exception)
+            return null;
+    }
+
+    void save(string data)
+    {
+        import std.file : exists, mkdirRecurse, rename, write;
+        import std.path : dirName;
+
+        auto dir = dirName(path);
+        if (dir.length && !exists(dir))
+            mkdirRecurse(dir);
+        auto temp = path ~ ".tmp";
+        write(temp, data);
+        version (Posix)
+        {
+            import core.sys.posix.sys.stat : chmod;
+            import std.string : toStringz;
+
+            chmod(temp.toStringz, octal600);
+        }
+        rename(temp, path);
+    }
+
+    private enum octal600 = 6 * 64;
+}
+
+/// The per-user application data folder for `appName`. See `FileCookieStore.forApp`.
+string appDataDir(string appName)
+{
+    import std.path : buildPath;
+    import std.process : environment;
+
+    version (Windows)
+        return buildPath(environment.get("APPDATA", environment.get("USERPROFILE", ".")), appName);
+    else version (OSX)
+        return buildPath(environment.get("HOME", "."), "Library", "Application Support", appName);
+    else
+    {
+        auto data = environment.get("XDG_DATA_HOME");
+        if (data.length == 0)
+            data = buildPath(environment.get("HOME", "."), ".local", "share");
+        return buildPath(data, appName);
+    }
+}
+
+/// Thread-safe cookie storage used by `Client`.
+final class CookieJar
+{
+    private Cookie[] cookies;
+    private CookieStore store;
+    private Mutex lock;
+
+    this(CookieStore store = null)
+    {
+        lock = new Mutex;
+        setStore(store is null ? new MemoryCookieStore : store);
+    }
+
+    /// Replace the backing store and load whatever it holds.
+    void setStore(CookieStore store)
+    {
+        lock.lock();
+        scope (exit)
+            lock.unlock();
+        this.store = store;
+        cookies = parseStored(store.load());
+    }
+
+    /// Store the cookies from a `Set-Cookie` header received from `host`.
+    void setFromHeader(string header, string host)
+    {
+        auto cookie = parseSetCookie(header, host);
+        if (cookie.name.length == 0)
+            return;
+        put(cookie);
+    }
+
+    /// Store a cookie, replacing any with the same name, domain and path.
+    void put(Cookie cookie)
+    {
+        lock.lock();
+        scope (exit)
+            lock.unlock();
+        Cookie[] kept;
+        foreach (existing; cookies)
+            if (!(existing.name == cookie.name && existing.domain == cookie.domain && existing.path == cookie.path))
+                kept ~= existing;
+        if (!cookie.expired(now()) && cookie.value.length)
+            kept ~= cookie;
+        cookies = kept;
+        persist();
+    }
+
+    /// The `Cookie` request header value for a request to `host` and `path`.
+    string headerFor(string host, string path = "/", bool secure = true)
+    {
+        import std.array : join;
+
+        lock.lock();
+        scope (exit)
+            lock.unlock();
+        string[] parts;
+        auto time = now();
+        foreach (cookie; cookies)
+            if (!cookie.expired(time) && matches(cookie, host, path, secure))
+                parts ~= cookie.name ~ "=" ~ cookie.value;
+        return parts.join("; ");
+    }
+
+    /// Value of the named cookie for `host`, or null.
+    string get(string name, string host)
+    {
+        lock.lock();
+        scope (exit)
+            lock.unlock();
+        auto time = now();
+        foreach (cookie; cookies)
+            if (cookie.name == name && !cookie.expired(time) && matches(cookie, host, "/", true))
+                return cookie.value;
+        return null;
+    }
+
+    /// Every stored cookie that has not expired.
+    Cookie[] all()
+    {
+        lock.lock();
+        scope (exit)
+            lock.unlock();
+        Cookie[] result;
+        auto time = now();
+        foreach (cookie; cookies)
+            if (!cookie.expired(time))
+                result ~= cookie;
+        return result;
+    }
+
+    /// Remove every cookie, signing the user out locally.
+    void clear()
+    {
+        lock.lock();
+        scope (exit)
+            lock.unlock();
+        cookies = null;
+        persist();
+    }
+
+    private void persist()
+    {
+        JSONValue[] items;
+        auto time = now();
+        foreach (cookie; cookies)
+        {
+            if (cookie.expired(time))
+                continue;
+            items ~= JSONValue([
+                "name": JSONValue(cookie.name),
+                "value": JSONValue(cookie.value),
+                "domain": JSONValue(cookie.domain),
+                "path": JSONValue(cookie.path),
+                "expires": JSONValue(cookie.expires),
+                "secure": JSONValue(cookie.secure),
+                "hostOnly": JSONValue(cookie.hostOnly),
+            ]);
+        }
+        try
+            store.save(JSONValue(items).toString());
+        catch (Exception)
+        {
+            // A store that cannot write must not break the request that set the cookie.
+        }
+    }
+
+    private static Cookie[] parseStored(string data)
+    {
+        Cookie[] result;
+        if (data.length == 0)
+            return result;
+        try
+        {
+            auto json = parseJSON(data);
+            if (json.type != JSONType.array)
+                return result;
+            foreach (item; json.array)
+            {
+                Cookie cookie;
+                cookie.name = item["name"].str;
+                cookie.value = item["value"].str;
+                cookie.domain = item["domain"].str;
+                cookie.path = item["path"].str;
+                cookie.expires = item["expires"].integer;
+                cookie.secure = item["secure"].boolean;
+                cookie.hostOnly = item["hostOnly"].boolean;
+                result ~= cookie;
+            }
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        return result;
+    }
+
+    private static bool matches(const Cookie cookie, string host, string path, bool secure)
+    {
+        host = host.toLower;
+        auto domainMatch = cookie.hostOnly
+            ? host == cookie.domain
+            : host == cookie.domain || host.endsWith("." ~ cookie.domain);
+        if (!domainMatch)
+            return false;
+        // Like browsers, treat loopback hosts as secure so local development servers work.
+        if (cookie.secure && !secure && !isLoopback(host))
+            return false;
+        if (path.length == 0)
+            path = "/";
+        return path.startsWith(cookie.path) || cookie.path == "/";
+    }
+
+    private static bool isLoopback(string host)
+    {
+        return host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1"
+            || host.endsWith(".localhost");
+    }
+
+    private static long now()
+    {
+        return Clock.currTime.toUnixTime;
+    }
+}
+
+/// Parse a `Set-Cookie` header value. Returns a cookie with an empty name when invalid.
+Cookie parseSetCookie(string header, string host)
+{
+    import std.algorithm : splitter;
+    import std.conv : to;
+    import std.datetime.systime : parseRFC822DateTime;
+
+    Cookie cookie;
+    cookie.domain = host.toLower;
+    bool first = true;
+    bool sawMaxAge;
+    foreach (part; header.splitter(';'))
+    {
+        part = part.strip;
+        auto eq = part.indexOf('=');
+        string key = eq < 0 ? part : part[0 .. eq].strip;
+        string value = eq < 0 ? "" : part[eq + 1 .. $].strip;
+        if (first)
+        {
+            first = false;
+            if (eq <= 0)
+                return Cookie.init;
+            cookie.name = key;
+            if (value.length >= 2 && value[0] == '"' && value[$ - 1] == '"')
+                value = value[1 .. $ - 1];
+            cookie.value = value;
+            continue;
+        }
+        switch (key.toLower)
+        {
+        case "domain":
+            auto domain = value.toLower;
+            while (domain.startsWith("."))
+                domain = domain[1 .. $];
+            if (domain.length)
+            {
+                cookie.domain = domain;
+                cookie.hostOnly = false;
+            }
+            break;
+        case "path":
+            if (value.startsWith("/"))
+                cookie.path = value;
+            break;
+        case "max-age":
+            try
+            {
+                auto seconds = value.to!long;
+                cookie.expires = seconds <= 0 ? 1 : Clock.currTime.toUnixTime + seconds;
+                sawMaxAge = true;
+            }
+            catch (Exception)
+            {
+            }
+            break;
+        case "expires":
+            if (sawMaxAge)
+                break;
+            try
+                cookie.expires = parseRFC822DateTime(value).toUnixTime;
+            catch (Exception)
+            {
+                // Some servers write the date with dashes ("Wed, 21-Oct-2026 ...").
+                try
+                {
+                    import std.array : replace;
+
+                    cookie.expires = parseRFC822DateTime(value.replace("-", " ")).toUnixTime;
+                }
+                catch (Exception)
+                {
+                }
+            }
+            break;
+        case "secure":
+            cookie.secure = true;
+            break;
+        default:
+            break;
+        }
+    }
+    return cookie;
+}
+
+unittest
+{
+    auto jar = new CookieJar;
+    jar.setFromHeader("a_session_p=secret; expires=Wed, 21 Oct 2099 07:28:00 GMT; path=/; domain=.example.com; secure; httponly", "api.example.com");
+    jar.setFromHeader("other=1; Max-Age=0", "api.example.com");
+    assert(jar.get("a_session_p", "api.example.com") == "secret");
+    assert(jar.headerFor("api.example.com", "/v1/account") == "a_session_p=secret");
+    assert(jar.headerFor("api.example.com", "/v1/account", false) == "");
+    jar.setFromHeader("dev=1; path=/; domain=localhost; secure", "localhost");
+    assert(jar.headerFor("localhost", "/", false) == "dev=1");
+    assert(jar.headerFor("evil.com") == "");
+
+    auto store = new MemoryCookieStore;
+    auto first = new CookieJar(store);
+    first.setFromHeader("a=b", "localhost");
+    auto second = new CookieJar(store);
+    assert(second.headerFor("localhost", "/", false) == "a=b");
+    second.clear();
+    assert(new CookieJar(store).all().length == 0);
+}
+{% endverbatim %}

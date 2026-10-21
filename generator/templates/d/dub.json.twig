@@ -1,0 +1,20 @@
+{
+    "name": "{{ language.params.packageName }}",
+    "description": "{{ sdk.shortDescription }}",
+    "homepage": "{{ sdk.url }}",
+    "license": "{{ sdk.license }}",
+    "authors": ["{{ sdk.gitUserName }}"],
+    "copyright": "Copyright © {{ 'now' | date('Y') }}, {{ sdk.gitRepoName }} contributors",
+    "targetType": "library",
+    "sourcePaths": ["source"],
+    "importPaths": ["source"],
+    "excludedSourceFiles": ["source/app.d"],
+    "configurations": [
+        {
+            "name": "library"
+        },
+        {
+            "name": "unittest"
+        }
+    ]
+}

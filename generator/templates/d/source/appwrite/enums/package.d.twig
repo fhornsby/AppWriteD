@@ -1,0 +1,6 @@
+/// Enumerations. Import as `import enums = appwrite.enums;` (`import appwrite;` does this for you).
+module appwrite.enums;
+
+{% for enum in allEnums %}
+public import appwrite.enums.{{ enum.title | dModule }};
+{% endfor %}

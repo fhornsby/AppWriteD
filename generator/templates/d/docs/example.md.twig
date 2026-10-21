@@ -1,0 +1,35 @@
+```d
+import appwrite;
+
+auto client = new Client()
+    .setEndpoint("{{ spec | endpoint }}") // Your API Endpoint
+    .setProject("<YOUR_PROJECT_ID>"); // Your project ID
+
+auto {{ service.name | caseCamel | overrideIdentifier }} = new {{ service.name | caseUcfirst }}(client);
+
+{% set args = [] %}
+{% set optional = [] %}
+{% for parameter in (method | parameters('all')) %}
+{% if (parameter | dParamRequired) %}
+{% set args = args | merge([parameter | dArgumentExample]) %}
+{% endif %}
+{% endfor %}
+{% for parameter in (method | parameters('all')) %}
+{% if not (parameter | dParamRequired) %}
+{% set optional = optional | merge([parameter | dArgumentExample]) %}
+{% endif %}
+{% endfor %}
+{% set all = args | merge(optional) %}
+{% set returnType = method | dReturnType(spec) %}
+{% set prefix = returnType == 'void' ? '' : 'auto result = ' %}
+{% set call = service.name | caseCamel | overrideIdentifier ~ '.' ~ ((method | methodName) | caseCamel | overrideIdentifier) %}
+{% if all | length == 0 %}
+{{ prefix }}{{ call }}();
+{% else %}
+{{ prefix }}{{ call }}(
+{% for arg in all %}
+    {{ arg | raw }}{% if not loop.last %},{% endif %}{% if loop.index > args | length %} // optional{% endif %}{{ "\n" }}
+{%- endfor %}
+);
+{% endif %}
+```

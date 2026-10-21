@@ -1,0 +1,231 @@
+{% verbatim %}/**
+ * Helpers for OAuth2 sign-in from a desktop app.
+ *
+ * The provider's page opens in the system browser, and Appwrite redirects back
+ * to `http://localhost:<port>/` where a `LoopbackListener` is waiting. This is
+ * the flow RFC 8252 recommends for native apps, and the one the Flutter SDK
+ * uses on Windows and Linux.
+ */
+module appwrite.oauth;
+
+import core.time : Duration, MonoTime, msecs;
+import std.algorithm : splitter;
+import std.array : join;
+import std.conv : to;
+import std.socket;
+import std.string : indexOf, startsWith;
+import std.uri : decodeComponent, encodeComponent;
+
+import appwrite.exception;
+
+/// A one-shot HTTP listener on the loopback interface that captures the OAuth2 redirect.
+final class LoopbackListener
+{
+    private Socket[] sockets;
+    private ushort _port;
+
+    this()
+    {
+        auto v4 = new TcpSocket(AddressFamily.INET);
+        v4.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+        v4.bind(new InternetAddress("127.0.0.1", InternetAddress.PORT_ANY));
+        v4.listen(4);
+        _port = (cast(InternetAddress) v4.localAddress).port;
+        sockets ~= v4;
+
+        // Browsers may resolve "localhost" to ::1 first; listen there too when possible.
+        try
+        {
+            auto v6 = new TcpSocket(AddressFamily.INET6);
+            v6.setOption(SocketOptionLevel.IPV6, SocketOption.IPV6_V6ONLY, true);
+            v6.bind(new Internet6Address("::1", _port));
+            v6.listen(4);
+            sockets ~= v6;
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    /// The port the listener is bound to.
+    ushort port() const
+    {
+        return _port;
+    }
+
+    /// The redirect URL to give the OAuth2 flow.
+    string url() const
+    {
+        return "http://localhost:" ~ _port.to!string ~ "/";
+    }
+
+    /**
+     * Wait for the browser to be redirected here and return the full URL it
+     * requested. Throws `AppwriteException` when `timeout` passes first.
+     */
+    string wait(Duration timeout)
+    {
+        auto deadline = MonoTime.currTime + timeout;
+        auto set = new SocketSet;
+        while (true)
+        {
+            auto left = deadline - MonoTime.currTime;
+            if (left <= Duration.zero)
+                throw new AppwriteException("OAuth2 sign-in timed out", 408);
+            set.reset();
+            foreach (socket; sockets)
+                set.add(socket);
+            auto ready = Socket.select(set, null, null, left < 500.msecs ? left : 500.msecs);
+            if (ready <= 0)
+                continue;
+            foreach (socket; sockets)
+            {
+                if (!set.isSet(socket))
+                    continue;
+                auto connection = socket.accept();
+                scope (exit)
+                    connection.close();
+                auto target = readRequestTarget(connection);
+                if (target is null || !target.startsWith("/") || target.startsWith("/favicon"))
+                {
+                    respond(connection, "404 Not Found", "");
+                    continue;
+                }
+                auto failed = parseQuery(target).get("error", null) !is null;
+                respond(connection, "200 OK", page(failed));
+                return "http://localhost:" ~ _port.to!string ~ target;
+            }
+        }
+    }
+
+    /// Stop listening.
+    void close()
+    {
+        foreach (socket; sockets)
+            socket.close();
+        sockets = null;
+    }
+
+    private static string readRequestTarget(Socket connection)
+    {
+        connection.setOption(SocketOptionLevel.SOCKET, SocketOption.RCVTIMEO, 5000.msecs);
+        char[] request;
+        char[4096] buffer;
+        while (request.indexOf("\r\n") < 0 && request.length < 65_536)
+        {
+            auto received = connection.receive(buffer[]);
+            if (received <= 0)
+                break;
+            request ~= buffer[0 .. received];
+        }
+        auto line = request.indexOf("\r\n") >= 0 ? request[0 .. request.indexOf("\r\n")] : request;
+        auto parts = line.idup.splitter(' ');
+        if (parts.empty || parts.front != "GET")
+            return null;
+        parts.popFront();
+        return parts.empty ? null : parts.front;
+    }
+
+    private static void respond(Socket connection, string status, string html)
+    {
+        auto response = "HTTP/1.1 " ~ status ~ "\r\nContent-Type: text/html; charset=utf-8\r\n"
+            ~ "Content-Length: " ~ html.length.to!string ~ "\r\nConnection: close\r\n\r\n" ~ html;
+        connection.send(response);
+    }
+
+    private static string page(bool failed)
+    {
+        auto message = failed ? "Sign-in failed. You can close this window and try again."
+            : "Signed in. You can close this window and return to the app.";
+        return "<!doctype html><html><head><meta charset=\"utf-8\"><title>Appwrite</title></head>"
+            ~ "<body style=\"font-family:sans-serif;text-align:center;padding-top:4em\"><p>"
+            ~ message ~ "</p><script>window.close()</script></body></html>";
+    }
+}
+
+/// Decode the query string of `url` (or a bare query) into a map.
+string[string] parseQuery(string url)
+{
+    import std.array : replace;
+
+    string[string] result;
+    auto start = url.indexOf('?');
+    auto query = start >= 0 ? url[start + 1 .. $] : url;
+    auto hash = query.indexOf('#');
+    if (hash >= 0)
+        query = query[0 .. hash];
+    foreach (pair; query.splitter('&'))
+    {
+        if (pair.length == 0)
+            continue;
+        auto eq = pair.indexOf('=');
+        auto key = eq < 0 ? pair : pair[0 .. eq];
+        auto value = eq < 0 ? "" : pair[eq + 1 .. $];
+        try
+            result[decodeComponent(key.replace("+", " "))] = decodeComponent(value.replace("+", " "));
+        catch (Exception)
+            result[key] = value;
+    }
+    return result;
+}
+
+/// Return `url` with the given query parameters set, replacing any of the same name.
+string withQuery(string url, string[string] values)
+{
+    import std.algorithm : sort;
+    import std.array : replace;
+
+    auto start = url.indexOf('?');
+    auto base = start >= 0 ? url[0 .. start] : url;
+    string[] kept;
+    if (start >= 0)
+        foreach (pair; url[start + 1 .. $].splitter('&'))
+        {
+            if (pair.length == 0)
+                continue;
+            auto eq = pair.indexOf('=');
+            string name;
+            try
+                name = decodeComponent((eq < 0 ? pair : pair[0 .. eq]).replace("+", " "));
+            catch (Exception)
+                name = eq < 0 ? pair : pair[0 .. eq];
+            if (name !in values)
+                kept ~= pair;
+        }
+    foreach (key; values.keys.sort)
+        kept ~= encodeComponent(key) ~ "=" ~ encodeComponent(values[key]);
+    return kept.length ? base ~ "?" ~ kept.join("&") : base;
+}
+
+unittest
+{
+    auto query = parseQuery("http://localhost:1/?userId=u1&secret=a%2Bb&empty=");
+    assert(query["userId"] == "u1");
+    assert(query["secret"] == "a+b");
+    assert(query["empty"] == "");
+    assert(withQuery("https://x/a?project=p&success=old", ["success": "http://localhost:9/"])
+            == "https://x/a?project=p&success=http%3A%2F%2Flocalhost%3A9%2F");
+}
+
+unittest
+{
+    import std.socket : TcpSocket, InternetAddress;
+    import core.thread : Thread;
+    import core.time : seconds;
+
+    auto listener = new LoopbackListener;
+    auto port = listener.port;
+    auto browser = new Thread({
+        auto socket = new TcpSocket(new InternetAddress("127.0.0.1", port));
+        socket.send("GET /?userId=u&secret=s HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        char[512] buffer;
+        socket.receive(buffer[]);
+        socket.close();
+    });
+    browser.start();
+    auto url = listener.wait(5.seconds);
+    browser.join();
+    listener.close();
+    assert(parseQuery(url)["secret"] == "s");
+}
+{% endverbatim %}

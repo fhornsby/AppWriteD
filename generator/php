@@ -1,0 +1,12 @@
+#!/bin/sh
+# Run PHP 8.5, which the Appwrite SDK generator requires: the local `php` when
+# it is new enough, otherwise the official php:8.5-cli image through Docker.
+# The repository root is mounted at the same path inside the container.
+set -e
+root="$(cd "$(dirname "$0")/.." && pwd)"
+if command -v php >/dev/null 2>&1 && php -r 'exit(PHP_VERSION_ID >= 80500 ? 0 : 1);' 2>/dev/null; then
+    exec php "$@"
+fi
+image="${PHP_IMAGE:-php:8.5-cli}"
+exec docker run --rm -i --network host -u "$(id -u):$(id -g)" \
+    -e SDK_GEN_SPEC_FILE -v "$root:$root" -w "$PWD" "$image" php "$@"

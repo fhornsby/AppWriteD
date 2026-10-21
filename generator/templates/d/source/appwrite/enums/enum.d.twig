@@ -1,0 +1,23 @@
+{% set typeName = enum.title | dTypeName %}
+module appwrite.enums.{{ enum.title | dModule }};
+
+{% if enum | openEnum %}
+/// Suggested values for {{ typeName }}. Any string is accepted.
+struct {{ typeName }}
+{
+    @disable this();
+
+{% for value in enum.enum %}
+{% set key = enum.enumKeys is empty ? value : enum.enumKeys[loop.index0] %}
+    enum string {{ key | dEnumMember }} = {{ value | dString }};
+{% endfor %}
+}
+{% else %}
+{{ (enum.description ?: typeName) | dDoc }}enum {{ typeName }} : string
+{
+{% for value in enum.enum %}
+{% set key = enum.enumKeys is empty ? value : enum.enumKeys[loop.index0] %}
+    {{ key | dEnumMember }} = {{ value | dString }},
+{% endfor %}
+}
+{% endif %}

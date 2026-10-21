@@ -1,0 +1,147 @@
+module appwrite.services.{{ service.name | dModule }};
+
+import std.array : replace;
+import std.conv : to;
+import std.json;
+import std.typecons : Nullable;
+import std.uri : encodeComponent;
+
+import appwrite.client;
+import appwrite.exception;
+import appwrite.input_file;
+import appwrite.json;
+import appwrite.service;
+import appwrite.upload_progress;
+import enums = appwrite.enums;
+import models = appwrite.models;
+
+{{ service.description | dDoc }}class {{ service.name | caseUcfirst }} : Service
+{
+    this(Client client)
+    {
+        super(client);
+    }
+{% for method in (service | operations) %}
+{% set methodName = (method | methodName) | caseCamel | overrideIdentifier %}
+{% set shouldSkip = false %}
+{% if method.deprecated %}
+{% for otherMethod in (service | operations) %}
+{% if not otherMethod.deprecated and ((otherMethod | methodName) | caseCamel | overrideIdentifier) == methodName %}
+{% set shouldSkip = true %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if not shouldSkip %}
+{% set allParams = method | parameters('all') %}
+{% set declarations = [] %}
+{% for parameter in allParams %}
+{% if parameter | dParamRequired %}
+{% set declarations = declarations | merge([parameter | dParamDeclaration(spec)]) %}
+{% endif %}
+{% endfor %}
+{% for parameter in allParams %}
+{% if not (parameter | dParamRequired) %}
+{% set declarations = declarations | merge([parameter | dParamDeclaration(spec)]) %}
+{% endif %}
+{% endfor %}
+{% set isUpload = 'multipart/form-data' in (method | consumes) %}
+{% if isUpload %}
+{% set declarations = declarations | merge(['UploadProgressCallback onProgress = null']) %}
+{% endif %}
+{% set returnType = method | dReturnType(spec) %}
+
+{{ method.description | dDoc(4) }}{% if method.deprecated %}
+{% set since = method | appwrite('deprecated', {})['since'] ?? '' %}
+{% set replaceWith = method | appwrite('deprecated', {})['replaceWith'] ?? '' %}
+{% if since and replaceWith %}
+    deprecated("This API has been deprecated since {{ since }}. Please use `{{ replaceWith }}` instead.")
+{% else %}
+    deprecated("This API has been deprecated.")
+{% endif %}
+{% endif %}
+    {{ returnType }} {{ methodName }}({{ declarations | join(', ') | raw }})
+    {
+{% for parameter in (method | parameters('path')) %}
+{% if parameter.required and not (parameter | configKey(method)) and (parameter | dType) == 'string' %}
+{% if parameter | schemaNullable %}
+        if ({{ parameter | dParamName }} !is null && {{ parameter | dParamName }}.length == 0)
+{% else %}
+        if ({{ parameter | dParamName }}.length == 0)
+{% endif %}
+            throw new AppwriteException(`Missing required parameter: "{{ parameter.name | caseCamel }}"`);
+{% endif %}
+{% endfor %}
+        auto apiPath = "{{ method.path }}"{% for parameter in (method | parameters('path')) %}{{ "\n" }}            .replace("{{ '{' ~ parameter.name ~ '}' }}", {% if (parameter | configKey(method)) %}encodeComponent(client.config("{{ (parameter | configKey(method)) | caseLower }}")){% else %}{{ parameter | dPathValue(spec) }}{% endif %}){% endfor %};
+{% for key, security in (method | securityQueries) %}
+        apiPath ~= "{{ loop.first ? '?' : '&' }}{{ security.name }}=" ~ encodeComponent(client.config("{{ security.name | caseLower }}"));
+{% endfor %}
+
+        JSONValue[string] apiParams;
+{% for parameter in (method | parameters('query')) | merge(method | parameters('body')) %}
+{% if (parameter | schemaType) != 'file' %}
+{% if parameter.required %}
+        apiParams["{{ parameter.name }}"] = {{ parameter | dParamValue(spec) }};
+{% else %}
+        if ({{ parameter | dParamIsSet(spec) }})
+            apiParams["{{ parameter.name }}"] = {{ parameter | dParamValue(spec) }};
+{% endif %}
+{% endif %}
+{% endfor %}
+{% if (method | methodType) == 'webAuth' %}
+{% for name, scheme in (method | locationSchemes) %}
+        apiParams["{{ name | caseLower }}"] = JSONValue(client.config("{{ name | caseLower }}"));
+{% endfor %}
+
+        return client.webAuth(client.endpoint ~ apiPath ~ "?" ~ buildQuery(apiParams));
+    }
+{% else %}
+
+        string[string] apiHeaders;
+{% for key, security in (method | securityHeaders) %}
+        apiHeaders["{{ security.name }}"] = client.config("{{ key | caseLower }}");
+{% endfor %}
+{% for key, header in (method | methodHeaders) %}
+        apiHeaders["{{ key }}"] = "{{ header }}";
+{% endfor %}
+{% for parameter in (method | parameters('header')) %}
+{% if parameter | dParamRequired %}
+        apiHeaders["{{ parameter.name }}"] = scalarText(serialize({{ parameter | dParamName }}));
+{% else %}
+        if ({{ parameter | dParamIsSet(spec) }})
+            apiHeaders["{{ parameter.name }}"] = scalarText(serialize({{ parameter | dParamName }}));
+{% endif %}
+{% endfor %}
+
+{% if isUpload %}
+{% set fileParam = null %}
+{% for parameter in allParams %}
+{% if (parameter | schemaType) == 'file' %}
+{% set fileParam = parameter %}
+{% endif %}
+{% endfor %}
+{% set uploadIdParameter = method | uploadIdParameter %}
+        auto apiResponse = client.chunkedUpload(HttpMethod.{{ method.method.value | caseLower | overrideIdentifier }}, apiPath, apiHeaders, apiParams,
+            "{{ fileParam.name }}", "{{ uploadIdParameter ? uploadIdParameter.name : '' }}", {{ fileParam | dParamName }}, onProgress{% if method | textResponse %}, ResponseType.plain{% endif %});
+{% elseif (method | methodType) == 'location' %}
+        auto apiResponse = client.call(HttpMethod.{{ method.method.value | caseLower | overrideIdentifier }}, apiPath, apiHeaders, apiParams, ResponseType.bytes);
+{% elseif method | textResponse %}
+        auto apiResponse = client.call(HttpMethod.{{ method.method.value | caseLower | overrideIdentifier }}, apiPath, apiHeaders, apiParams, ResponseType.plain);
+{% else %}
+        auto apiResponse = client.call(HttpMethod.{{ method.method.value | caseLower | overrideIdentifier }}, apiPath, apiHeaders, apiParams);
+{% endif %}
+{% if returnType == 'void' %}
+        cast(void) apiResponse;
+{% elseif returnType == 'ubyte[]' %}
+        return apiResponse.bytes;
+{% elseif returnType == 'string' %}
+        return apiResponse.text;
+{% elseif returnType == 'JSONValue' %}
+        return apiResponse.json;
+{% else %}
+        return deserialize!({{ returnType }})(apiResponse.json);
+{% endif %}
+    }
+{% endif %}
+{% endif %}
+{% endfor %}
+}

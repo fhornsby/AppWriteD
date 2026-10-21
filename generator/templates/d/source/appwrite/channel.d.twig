@@ -1,0 +1,261 @@
+{% verbatim %}/**
+ * Typed builders for realtime channel names.
+ *
+ * ---
+ * Channel.tablesdb("main").table("todos").row()          // "tablesdb.main.tables.todos.rows"
+ * Channel.bucket("photos").file("cat").update()          // "buckets.photos.files.cat.update"
+ * Channel.account()                                      // "account"
+ * ---
+ *
+ * Each step only offers what can follow it, so an invalid channel does not
+ * compile. A `ChannelPath` converts to `string` implicitly.
+ */
+module appwrite.channel;
+
+import std.array : join;
+import std.string : strip;
+
+import appwrite.exception;
+
+/// States a channel path can be in; they decide which methods are available.
+enum ChannelState
+{
+    database,
+    collection,
+    document,
+    tablesDB,
+    table,
+    row,
+    bucket,
+    file,
+    function_,
+    execution,
+    team,
+    membership,
+    presence,
+    resolved,
+}
+
+/// A channel name under construction.
+struct ChannelPath(ChannelState state)
+{
+    private string[] segments;
+
+    /// The channel name, e.g. `databases.main.collections.todos.documents`.
+    string toString() const
+    {
+        return segments.join(".");
+    }
+
+    alias toString this;
+
+    private auto next(ChannelState to)(string segment, string id = null) const
+    {
+        auto copy = segments.dup ~ segment;
+        if (id !is null)
+            copy ~= normalize(id);
+        return ChannelPath!to(copy);
+    }
+
+    private auto resolve(string action) const
+    {
+        return ChannelPath!(ChannelState.resolved)(segments.dup ~ action);
+    }
+
+    static if (state == ChannelState.database)
+    {
+        /// The collection `id`.
+        auto collection(string id) const
+        {
+            return next!(ChannelState.collection)("collections", id);
+        }
+    }
+
+    static if (state == ChannelState.collection)
+    {
+        /// Documents in the collection, or the document `id`.
+        auto document(string id = null) const
+        {
+            return next!(ChannelState.document)("documents", id);
+        }
+    }
+
+    static if (state == ChannelState.tablesDB)
+    {
+        /// The table `id`.
+        auto table(string id) const
+        {
+            return next!(ChannelState.table)("tables", id);
+        }
+    }
+
+    static if (state == ChannelState.table)
+    {
+        /// Rows in the table, or the row `id`.
+        auto row(string id = null) const
+        {
+            return next!(ChannelState.row)("rows", id);
+        }
+    }
+
+    static if (state == ChannelState.bucket)
+    {
+        /// Files in the bucket, or the file `id`.
+        auto file(string id = null) const
+        {
+            return next!(ChannelState.file)("files", id);
+        }
+    }
+
+    static if (state == ChannelState.document || state == ChannelState.row || state == ChannelState.file
+            || state == ChannelState.team || state == ChannelState.membership || state == ChannelState.presence)
+    {
+        /// Only creations.
+        auto create() const
+        {
+            return resolve("create");
+        }
+
+        /// Only updates.
+        auto update() const
+        {
+            return resolve("update");
+        }
+
+        /// Only deletions.
+        auto delete_() const
+        {
+            return resolve("delete");
+        }
+    }
+
+    static if (state == ChannelState.document || state == ChannelState.row || state == ChannelState.presence)
+    {
+        /// Only upserts.
+        auto upsert() const
+        {
+            return resolve("upsert");
+        }
+    }
+}
+
+/// Starting points for channel names.
+struct Channel
+{
+    @disable this();
+
+    /// The database `id` (legacy Databases API).
+    static auto database(string id)
+    {
+        return ChannelPath!(ChannelState.database)(["databases", normalize(id)]);
+    }
+
+    /// The TablesDB database `id`.
+    static auto tablesdb(string id)
+    {
+        return ChannelPath!(ChannelState.tablesDB)(["tablesdb", normalize(id)]);
+    }
+
+    /// The storage bucket `id`.
+    static auto bucket(string id)
+    {
+        return ChannelPath!(ChannelState.bucket)(["buckets", normalize(id)]);
+    }
+
+    /// The function `id`.
+    static auto function_(string id)
+    {
+        return ChannelPath!(ChannelState.function_)(["functions", normalize(id)]);
+    }
+
+    /// The execution `id`.
+    static auto execution(string id)
+    {
+        return ChannelPath!(ChannelState.execution)(["executions", normalize(id)]);
+    }
+
+    /// The team `id`.
+    static auto team(string id)
+    {
+        return ChannelPath!(ChannelState.team)(["teams", normalize(id)]);
+    }
+
+    /// The membership `id`.
+    static auto membership(string id)
+    {
+        return ChannelPath!(ChannelState.membership)(["memberships", normalize(id)]);
+    }
+
+    /// The presence `id`.
+    static auto presence(string id)
+    {
+        return ChannelPath!(ChannelState.presence)(["presences", normalize(id)]);
+    }
+
+    /// The current user's account.
+    static string account()
+    {
+        return "account";
+    }
+
+    /// Every document you can read.
+    static string documents()
+    {
+        return "documents";
+    }
+
+    /// Every row you can read.
+    static string rows()
+    {
+        return "rows";
+    }
+
+    /// Every file you can read.
+    static string files()
+    {
+        return "files";
+    }
+
+    /// Every execution you can read.
+    static string executions()
+    {
+        return "executions";
+    }
+
+    /// Every team you can read.
+    static string teams()
+    {
+        return "teams";
+    }
+
+    /// Every membership you can read.
+    static string memberships()
+    {
+        return "memberships";
+    }
+
+    /// Every presence you can read.
+    static string presences()
+    {
+        return "presences";
+    }
+}
+
+private string normalize(string id)
+{
+    auto trimmed = id.strip;
+    if (trimmed.length == 0)
+        throw new AppwriteException("Channel ID is required");
+    return trimmed;
+}
+
+unittest
+{
+    string channel = Channel.tablesdb("main").table("todos").row();
+    assert(channel == "tablesdb.main.tables.todos.rows");
+    assert(Channel.database("db").collection("c").document("d").update().toString()
+            == "databases.db.collections.c.documents.d.update");
+    assert(Channel.bucket("b").file().create().toString() == "buckets.b.files.create");
+    static assert(!__traits(compiles, Channel.bucket("b").row()));
+}
+{% endverbatim %}

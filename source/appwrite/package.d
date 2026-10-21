@@ -1,0 +1,42 @@
+/**
+ * Appwrite client SDK for the D programming language. Use it to connect desktop apps, games and UI toolkits written in D to an Appwrite server: accounts and sessions, databases, storage, functions, realtime and more.
+ *
+ * ---
+ * import appwrite;
+ *
+ * auto client = new Client()
+ *     .setEndpoint("https://<REGION>.cloud.appwrite.io/v1")
+ *     .setProject("<PROJECT_ID>");
+ *
+ * auto account = new Account(client);
+ * auto user = account.get();
+ * ---
+ *
+ * Models are under `models.` (e.g. `models.User`) and enums under `enums.`
+ * (e.g. `enums.OAuthProvider`), as in the Flutter SDK.
+ */
+module appwrite;
+
+public import appwrite.async;
+public import appwrite.channel;
+public import appwrite.client;
+public import appwrite.cookies;
+public import appwrite.exception;
+public import appwrite.id;
+public import appwrite.input_file;
+public import appwrite.json : deserialize, emptyList, isSet, jsonExtra, jsonKey, serialize, toJSONString, unset;
+public import appwrite.operator;
+public import appwrite.permission;
+public import appwrite.query;
+public import appwrite.realtime;
+public import appwrite.role;
+public import appwrite.service;
+public import appwrite.services;
+public import appwrite.upload_progress;
+public import enums = appwrite.enums;
+public import models = appwrite.models;
+public import std.json : JSONType, JSONValue, parseJSON;
+public import std.typecons : Nullable, nullable;
+
+/// Version of this SDK.
+enum sdkVersion = "0.1.0";

@@ -1,0 +1,8 @@
+{
+    "name": "realtime",
+    "description": "AppwriteD realtime example",
+    "targetType": "executable",
+    "dependencies": {
+        "appwrited": { "path": "../.." }
+    }
+}

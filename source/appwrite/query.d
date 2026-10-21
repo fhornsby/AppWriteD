@@ -1,0 +1,686 @@
+/**
+ * Query strings for list endpoints and realtime filters.
+ *
+ * ---
+ * tablesDB.listRows(databaseId: "main", tableId: "todos", queries: [
+ *     Query.equal("done", false),
+ *     Query.orderDesc("$createdAt"),
+ *     Query.limit(20),
+ * ]);
+ * ---
+ *
+ * Values may be strings, numbers, booleans, or arrays of them. Passing an
+ * array to `equal` matches any of its values.
+ */
+module appwrite.query;
+
+import std.array : joinStrings = join;
+import std.json : JSONValue;
+import std.traits : isArray, isSomeString;
+
+import appwrite.json : serialize, toJSONString;
+
+/// Query builders. Each returns the query's JSON text.
+struct Query
+{
+    @disable this();
+
+    /// `attribute` equals `value` (any of the values, for an array).
+    static string equal(T)(string attribute, T value)
+    {
+        return build("equal", attribute, values(value));
+    }
+
+    /// `attribute` does not equal `value`.
+    static string notEqual(T)(string attribute, T value)
+    {
+        return build("notEqual", attribute, values(value));
+    }
+
+    /// `attribute` matches the regular expression `pattern`.
+    static string regex(string attribute, string pattern)
+    {
+        return build("regex", attribute, values(pattern));
+    }
+
+    /// `attribute` is less than `value`.
+    static string lessThan(T)(string attribute, T value)
+    {
+        return build("lessThan", attribute, values(value));
+    }
+
+    /// `attribute` is less than or equal to `value`.
+    static string lessThanEqual(T)(string attribute, T value)
+    {
+        return build("lessThanEqual", attribute, values(value));
+    }
+
+    /// `attribute` is greater than `value`.
+    static string greaterThan(T)(string attribute, T value)
+    {
+        return build("greaterThan", attribute, values(value));
+    }
+
+    /// `attribute` is greater than or equal to `value`.
+    static string greaterThanEqual(T)(string attribute, T value)
+    {
+        return build("greaterThanEqual", attribute, values(value));
+    }
+
+    /// Full-text search of `attribute` for `value`.
+    static string search(string attribute, string value)
+    {
+        return build("search", attribute, values(value));
+    }
+
+    /// `attribute` is null.
+    static string isNull(string attribute)
+    {
+        return build("isNull", attribute);
+    }
+
+    /// `attribute` is not null.
+    static string isNotNull(string attribute)
+    {
+        return build("isNotNull", attribute);
+    }
+
+    /// All of `attributes` exist.
+    static string exists(string[] attributes)
+    {
+        return build("exists", null, values(attributes));
+    }
+
+    /// None of `attributes` exist.
+    static string notExists(string[] attributes)
+    {
+        return build("notExists", null, values(attributes));
+    }
+
+    /// `attribute` is between `start` and `end`, inclusive.
+    static string between(T, U)(string attribute, T start, U end)
+    {
+        return build("between", attribute, pair(start, end));
+    }
+
+    /// `attribute` starts with `value`.
+    static string startsWith(string attribute, string value)
+    {
+        return build("startsWith", attribute, values(value));
+    }
+
+    /// `attribute` ends with `value`.
+    static string endsWith(string attribute, string value)
+    {
+        return build("endsWith", attribute, values(value));
+    }
+
+    /// A string `attribute` contains the substring `value` (or any of the values, for an array).
+    /// For array attributes use `containsAny` or `containsAll`.
+    static string contains(T)(string attribute, T value)
+    {
+        return build("contains", attribute, values(value));
+    }
+
+    /// An array `attribute` contains at least one of `value`.
+    static string containsAny(T)(string attribute, T[] value)
+    {
+        return build("containsAny", attribute, values(value));
+    }
+
+    /// An array `attribute` contains every one of `value`.
+    static string containsAll(T)(string attribute, T[] value)
+    {
+        return build("containsAll", attribute, values(value));
+    }
+
+    /// `attribute` does not contain `value`.
+    static string notContains(T)(string attribute, T value)
+    {
+        return build("notContains", attribute, values(value));
+    }
+
+    /// Inverse of `search`.
+    static string notSearch(string attribute, string value)
+    {
+        return build("notSearch", attribute, values(value));
+    }
+
+    /// `attribute` is not between `start` and `end`.
+    static string notBetween(T, U)(string attribute, T start, U end)
+    {
+        return build("notBetween", attribute, pair(start, end));
+    }
+
+    /// `attribute` does not start with `value`.
+    static string notStartsWith(string attribute, string value)
+    {
+        return build("notStartsWith", attribute, values(value));
+    }
+
+    /// `attribute` does not end with `value`.
+    static string notEndsWith(string attribute, string value)
+    {
+        return build("notEndsWith", attribute, values(value));
+    }
+
+    /// Created before `value` (an ISO 8601 date).
+    static string createdBefore(string value)
+    {
+        return lessThan("$createdAt", value);
+    }
+
+    /// Created after `value`.
+    static string createdAfter(string value)
+    {
+        return greaterThan("$createdAt", value);
+    }
+
+    /// Created between `start` and `end`, inclusive.
+    static string createdBetween(string start, string end)
+    {
+        return between("$createdAt", start, end);
+    }
+
+    /// Updated before `value`.
+    static string updatedBefore(string value)
+    {
+        return lessThan("$updatedAt", value);
+    }
+
+    /// Updated after `value`.
+    static string updatedAfter(string value)
+    {
+        return greaterThan("$updatedAt", value);
+    }
+
+    /// Updated between `start` and `end`, inclusive.
+    static string updatedBetween(string start, string end)
+    {
+        return between("$updatedAt", start, end);
+    }
+
+    /// Any of `queries` match.
+    static string or(string[] queries)
+    {
+        return build("or", null, nested(queries));
+    }
+
+    /// All of `queries` match.
+    static string and(string[] queries)
+    {
+        return build("and", null, nested(queries));
+    }
+
+    /// At least one element of the array `attribute` matches all of `queries`.
+    static string elemMatch(string attribute, string[] queries)
+    {
+        return build("elemMatch", attribute, nested(queries));
+    }
+
+    /// Filter, order, select and paginate the related rows of relationship `attribute`.
+    static string relationship(string attribute, string[] queries)
+    {
+        return build("relationship", attribute, nested(queries));
+    }
+
+    /// Return only `attributes`.
+    static string select(string[] attributes)
+    {
+        return build("select", null, values(attributes));
+    }
+
+    /// Sort by `attribute`, ascending.
+    static string orderAsc(string attribute)
+    {
+        return build("orderAsc", attribute);
+    }
+
+    /// Sort by `attribute`, descending.
+    static string orderDesc(string attribute)
+    {
+        return build("orderDesc", attribute);
+    }
+
+    /// Sort randomly.
+    static string orderRandom()
+    {
+        return build("orderRandom");
+    }
+
+    /// Results before the row with ID `id` (cursor pagination).
+    static string cursorBefore(string id)
+    {
+        return build("cursorBefore", null, values(id));
+    }
+
+    /// Results after the row with ID `id` (cursor pagination).
+    static string cursorAfter(string id)
+    {
+        return build("cursorAfter", null, values(id));
+    }
+
+    /// Return at most `limit` results.
+    static string limit(long limit)
+    {
+        return build("limit", null, values(limit));
+    }
+
+    /// Skip the first `offset` results.
+    static string offset(long offset)
+    {
+        return build("offset", null, values(offset));
+    }
+
+    /// `attribute` is exactly `distance` from the point `values`. Distance is in meters unless `meters` is false.
+    static string distanceEqual(T)(string attribute, T values, double distance, bool meters = true)
+    {
+        return build("distanceEqual", attribute, distanceValues(values, distance, meters));
+    }
+
+    /// `attribute` is not `distance` from `values`.
+    static string distanceNotEqual(T)(string attribute, T values, double distance, bool meters = true)
+    {
+        return build("distanceNotEqual", attribute, distanceValues(values, distance, meters));
+    }
+
+    /// `attribute` is further than `distance` from `values`.
+    static string distanceGreaterThan(T)(string attribute, T values, double distance, bool meters = true)
+    {
+        return build("distanceGreaterThan", attribute, distanceValues(values, distance, meters));
+    }
+
+    /// `attribute` is closer than `distance` to `values`.
+    static string distanceLessThan(T)(string attribute, T values, double distance, bool meters = true)
+    {
+        return build("distanceLessThan", attribute, distanceValues(values, distance, meters));
+    }
+
+    /// Order by dot-product similarity of the vector `attribute` to `vector`.
+    static string vectorDot(string attribute, double[] vector)
+    {
+        return build("vectorDot", attribute, wrap(vector));
+    }
+
+    /// Order by cosine similarity of the vector `attribute` to `vector`.
+    static string vectorCosine(string attribute, double[] vector)
+    {
+        return build("vectorCosine", attribute, wrap(vector));
+    }
+
+    /// Order by Euclidean distance of the vector `attribute` from `vector`.
+    static string vectorEuclidean(string attribute, double[] vector)
+    {
+        return build("vectorEuclidean", attribute, wrap(vector));
+    }
+
+    /// The geometry `attribute` intersects `values`.
+    static string intersects(T)(string attribute, T values)
+    {
+        return build("intersects", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` does not intersect `values`.
+    static string notIntersects(T)(string attribute, T values)
+    {
+        return build("notIntersects", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` crosses `values`.
+    static string crosses(T)(string attribute, T values)
+    {
+        return build("crosses", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` does not cross `values`.
+    static string notCrosses(T)(string attribute, T values)
+    {
+        return build("notCrosses", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` overlaps `values`.
+    static string overlaps(T)(string attribute, T values)
+    {
+        return build("overlaps", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` does not overlap `values`.
+    static string notOverlaps(T)(string attribute, T values)
+    {
+        return build("notOverlaps", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` touches `values`.
+    static string touches(T)(string attribute, T values)
+    {
+        return build("touches", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` does not touch `values`.
+    static string notTouches(T)(string attribute, T values)
+    {
+        return build("notTouches", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` covers `values`.
+    static string covers(T)(string attribute, T values)
+    {
+        return build("covers", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` does not cover `values`.
+    static string notCovers(T)(string attribute, T values)
+    {
+        return build("notCovers", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` equals `values`.
+    static string spatialEquals(T)(string attribute, T values)
+    {
+        return build("spatialEquals", attribute, wrap(values));
+    }
+
+    /// The geometry `attribute` does not equal `values`.
+    static string notSpatialEquals(T)(string attribute, T values)
+    {
+        return build("notSpatialEquals", attribute, wrap(values));
+    }
+
+    /// Count rows (or non-null values of `attribute`), optionally named `alias_`.
+    static string count(string attribute = "*", string alias_ = "")
+    {
+        return aggregate("count", attribute, alias_);
+    }
+
+    /// Count distinct values of `attribute`.
+    static string countDistinct(string attribute, string alias_ = "")
+    {
+        return aggregate("countDistinct", attribute, alias_);
+    }
+
+    /// Sum of `attribute`.
+    static string sum(string attribute, string alias_ = "")
+    {
+        return aggregate("sum", attribute, alias_);
+    }
+
+    /// Average of `attribute`.
+    static string avg(string attribute, string alias_ = "")
+    {
+        return aggregate("avg", attribute, alias_);
+    }
+
+    /// Smallest value of `attribute`.
+    static string min(string attribute, string alias_ = "")
+    {
+        return aggregate("min", attribute, alias_);
+    }
+
+    /// Largest value of `attribute`.
+    static string max(string attribute, string alias_ = "")
+    {
+        return aggregate("max", attribute, alias_);
+    }
+
+    /// Population standard deviation of `attribute` (same as `stddevPop`).
+    static string stddev(string attribute, string alias_ = "")
+    {
+        return aggregate("stddev", attribute, alias_);
+    }
+
+    /// Population standard deviation of `attribute`.
+    static string stddevPop(string attribute, string alias_ = "")
+    {
+        return aggregate("stddevPop", attribute, alias_);
+    }
+
+    /// Sample standard deviation of `attribute`.
+    static string stddevSamp(string attribute, string alias_ = "")
+    {
+        return aggregate("stddevSamp", attribute, alias_);
+    }
+
+    /// Population variance of `attribute` (same as `varPop`).
+    static string variance(string attribute, string alias_ = "")
+    {
+        return aggregate("variance", attribute, alias_);
+    }
+
+    /// Population variance of `attribute`.
+    static string varPop(string attribute, string alias_ = "")
+    {
+        return aggregate("varPop", attribute, alias_);
+    }
+
+    /// Sample variance of `attribute`.
+    static string varSamp(string attribute, string alias_ = "")
+    {
+        return aggregate("varSamp", attribute, alias_);
+    }
+
+    /// Bitwise AND of `attribute`.
+    static string bitAnd(string attribute, string alias_ = "")
+    {
+        return aggregate("bitAnd", attribute, alias_);
+    }
+
+    /// Bitwise OR of `attribute`.
+    static string bitOr(string attribute, string alias_ = "")
+    {
+        return aggregate("bitOr", attribute, alias_);
+    }
+
+    /// Bitwise XOR of `attribute`.
+    static string bitXor(string attribute, string alias_ = "")
+    {
+        return aggregate("bitXor", attribute, alias_);
+    }
+
+    /// Group results by `attributes`.
+    static string groupBy(string[] attributes)
+    {
+        return build("groupBy", null, values(attributes));
+    }
+
+    /// Filter grouped results; `queries` nest like `and`.
+    static string having(string[] queries)
+    {
+        return build("having", null, nested(queries));
+    }
+
+    /// Return distinct rows.
+    static string distinct()
+    {
+        return build("distinct");
+    }
+
+    /// Join condition comparing column `left` with column `right`.
+    static string on(string left, string right, string operator = "=")
+    {
+        return build("on", null, values([left, operator, right]));
+    }
+
+    /// Inner join `table` on `left operator right`, optionally naming the join `alias_`.
+    static string join(string table, string left, string right, string operator = "=", string alias_ = "")
+    {
+        return joinQuery("join", table, left, right, operator, alias_);
+    }
+
+    /// Inner join `table` on the `on` conditions (`Query.on` and filters), optionally named `alias_`.
+    static string join(string table, string alias_, string[] on)
+    {
+        return nestedJoin("join", table, alias_, on);
+    }
+
+    /// ditto
+    static string join(string table, string[] on)
+    {
+        return nestedJoin("join", table, "", on);
+    }
+
+    /// Left join; see `join`.
+    static string leftJoin(string table, string left, string right, string operator = "=", string alias_ = "")
+    {
+        return joinQuery("leftJoin", table, left, right, operator, alias_);
+    }
+
+    /// ditto
+    static string leftJoin(string table, string alias_, string[] on)
+    {
+        return nestedJoin("leftJoin", table, alias_, on);
+    }
+
+    /// ditto
+    static string leftJoin(string table, string[] on)
+    {
+        return nestedJoin("leftJoin", table, "", on);
+    }
+
+    /// Right join; see `join`.
+    static string rightJoin(string table, string left, string right, string operator = "=", string alias_ = "")
+    {
+        return joinQuery("rightJoin", table, left, right, operator, alias_);
+    }
+
+    /// ditto
+    static string rightJoin(string table, string alias_, string[] on)
+    {
+        return nestedJoin("rightJoin", table, alias_, on);
+    }
+
+    /// ditto
+    static string rightJoin(string table, string[] on)
+    {
+        return nestedJoin("rightJoin", table, "", on);
+    }
+
+    /// Full outer join; see `join`.
+    static string fullOuterJoin(string table, string left, string right, string operator = "=", string alias_ = "")
+    {
+        return joinQuery("fullOuterJoin", table, left, right, operator, alias_);
+    }
+
+    /// ditto
+    static string fullOuterJoin(string table, string alias_, string[] on)
+    {
+        return nestedJoin("fullOuterJoin", table, alias_, on);
+    }
+
+    /// ditto
+    static string fullOuterJoin(string table, string[] on)
+    {
+        return nestedJoin("fullOuterJoin", table, "", on);
+    }
+
+    /// Cross join `table`, optionally named `alias_`.
+    static string crossJoin(string table, string alias_ = "")
+    {
+        return build("crossJoin", table, alias_.length ? values(alias_) : null);
+    }
+
+    /// `limit` and `offset` queries for 1-based page `page` of `perPage` results.
+    static string[] page(long page, long perPage = 25)
+    {
+        import std.conv : to;
+        import appwrite.exception : AppwriteException;
+
+        if (page < 1)
+            throw new AppwriteException("Page must be >= 1, got " ~ page.to!string);
+        if (perPage < 1)
+            throw new AppwriteException("Per page must be >= 1, got " ~ perPage.to!string);
+        if (page - 1 > long.max / perPage)
+            throw new AppwriteException("Page is too large");
+        return [limit(perPage), offset((page - 1) * perPage)];
+    }
+
+    private static string build(string method, string attribute = null, string valuesJson = null)
+    {
+        auto text = `{"method":` ~ quote(method);
+        if (attribute !is null)
+            text ~= `,"attribute":` ~ quote(attribute);
+        if (valuesJson !is null)
+            text ~= `,"values":` ~ valuesJson;
+        return text ~ "}";
+    }
+
+    private static string aggregate(string method, string attribute, string alias_)
+    {
+        return build(method, attribute, alias_.length ? values(alias_) : null);
+    }
+
+    private static string joinQuery(string method, string table, string left, string right,
+        string operator, string alias_)
+    {
+        auto items = [left, operator, right];
+        if (alias_.length)
+            items ~= alias_;
+        return build(method, table, values(items));
+    }
+
+    private static string nestedJoin(string method, string table, string alias_, string[] on)
+    {
+        string[] items;
+        if (alias_.length)
+            items ~= quote(alias_);
+        items ~= on;
+        return build(method, table, "[" ~ items.joinStrings(",") ~ "]");
+    }
+}
+
+/// A value as a JSON array of values: arrays as they are, anything else wrapped.
+package string values(T)(T value)
+{
+    static if (isArray!T && !isSomeString!T)
+        return toJSONString(serialize(value));
+    else
+        return "[" ~ toJSONString(serialize(value)) ~ "]";
+}
+
+private string wrap(T)(T value)
+{
+    return "[" ~ toJSONString(serialize(value)) ~ "]";
+}
+
+private string pair(T, U)(T first, U second)
+{
+    return "[" ~ toJSONString(serialize(first)) ~ "," ~ toJSONString(serialize(second)) ~ "]";
+}
+
+private string distanceValues(T)(T values, double distance, bool meters)
+{
+    return "[[" ~ toJSONString(serialize(values)) ~ "," ~ toJSONString(JSONValue(distance)) ~ ","
+        ~ (meters ? "true" : "false") ~ "]]";
+}
+
+private string nested(string[] queries)
+{
+    return "[" ~ queries.joinStrings(",") ~ "]";
+}
+
+private string quote(string text)
+{
+    return toJSONString(JSONValue(text));
+}
+
+unittest
+{
+    assert(Query.equal("released", true) == `{"method":"equal","attribute":"released","values":[true]}`);
+    assert(Query.equal("title", ["Spiderman", "Dr. Strange"])
+            == `{"method":"equal","attribute":"title","values":["Spiderman","Dr. Strange"]}`);
+    assert(Query.between("age", 50.5, 100.5) == `{"method":"between","attribute":"age","values":[50.5,100.5]}`);
+    assert(Query.isNull("name") == `{"method":"isNull","attribute":"name"}`);
+    assert(Query.orderRandom() == `{"method":"orderRandom"}`);
+    assert(Query.limit(50) == `{"method":"limit","values":[50]}`);
+    assert(Query.distanceEqual("location", [40.7128, -74], 1000)
+            == `{"method":"distanceEqual","attribute":"location","values":[[[40.7128,-74],1000,true]]}`);
+    assert(Query.intersects("location", [40.7128, -74])
+            == `{"method":"intersects","attribute":"location","values":[[40.7128,-74]]}`);
+    assert(Query.or([Query.equal("released", true), Query.lessThan("releasedYear", 1990)])
+            == `{"method":"or","values":[{"method":"equal","attribute":"released","values":[true]},`
+            ~ `{"method":"lessThan","attribute":"releasedYear","values":[1990]}]}`);
+    assert(Query.count() == `{"method":"count","attribute":"*"}`);
+    assert(Query.leftJoin("orders", "ord", [Query.on("$id", "customerId")])
+            == `{"method":"leftJoin","attribute":"orders","values":["ord",{"method":"on","values":["$id","=","customerId"]}]}`);
+    assert(Query.page(2, 10) == [Query.limit(10), Query.offset(10)]);
+}
+

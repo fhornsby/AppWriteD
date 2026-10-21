@@ -1,0 +1,40 @@
+{% verbatim %}module appwrite.id;
+
+/// Helpers for resource IDs.
+struct ID
+{
+    @disable this();
+
+    /**
+     * A new unique ID, generated on the device: a hex timestamp (like PHP's
+     * `uniqid`) followed by `padding` random hex digits.
+     */
+    static string unique(int padding = 7)
+    {
+        import std.datetime.systime : Clock;
+        import std.format : format;
+        import std.random : uniform;
+
+        auto now = Clock.currTime.toUnixTime!long;
+        auto usec = Clock.currTime.fracSecs.total!"usecs";
+        auto id = format("%x%05x", now, usec);
+        static immutable digits = "0123456789abcdef";
+        foreach (i; 0 .. padding)
+            id ~= digits[uniform(0, 16)];
+        return id;
+    }
+
+    /// Use `id` as the ID.
+    static string custom(string id)
+    {
+        return id;
+    }
+}
+
+unittest
+{
+    assert(ID.unique().length == 20);
+    assert(ID.unique() != ID.unique());
+    assert(ID.custom("custom_id") == "custom_id");
+}
+{% endverbatim %}

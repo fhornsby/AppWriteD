@@ -1,0 +1,20 @@
+{
+    "name": "AppwriteD",
+    "packageName": "appwrited",
+    "version": "0.1.0",
+    "specVersion": "2.5.x",
+    "description": "Appwrite client SDK for the D programming language. Use it to connect desktop apps, games and UI toolkits written in D to an Appwrite server: accounts and sessions, databases, storage, functions, realtime and more.",
+    "shortDescription": "Appwrite client SDK for D",
+    "url": "https://github.com/fhornsby/AppWriteD",
+    "gitUserName": "fhornsby",
+    "gitRepoName": "AppWriteD",
+    "license": "MIT",
+    "licenseFile": "LICENSE.txt",
+    "changelogFile": "CHANGELOG.md",
+    "exclude": {
+        "services": [
+            {"name": "documentsDB"},
+            {"name": "vectorsDB"}
+        ]
+    }
+}
