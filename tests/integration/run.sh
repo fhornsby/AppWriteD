@@ -41,13 +41,40 @@ console() { # method path [json]
         -H "Content-Type: application/json" -H "X-Appwrite-Project: console" ${3:+-d "$3"}
 }
 
+# The API answers /health before it has finished initialising, so each setup
+# step is retried until it succeeds.
+retry() { # function
+    for attempt in $(seq 1 30); do
+        if "$1"; then
+            return 0
+        fi
+        sleep 2
+    done
+    echo "Setup step $1 kept failing" >&2
+    return 1
+}
+
+sign_in() {
+    console POST /account '{"userId":"admin","email":"admin@example.com","password":"integration-admin-1","name":"Admin"}' >/dev/null 2>&1 || true
+    console POST /account/sessions/email '{"email":"admin@example.com","password":"integration-admin-1"}' >/dev/null
+}
+
+create_project() {
+    console POST /teams '{"teamId":"org","name":"Org"}' >/dev/null 2>&1 || true
+    console POST /projects '{"projectId":"dtest","name":"D test","teamId":"org","region":"default"}' >/dev/null 2>&1 \
+        || console GET /projects/dtest >/dev/null
+}
+
+create_key() {
+    key="$(console POST /projects/dtest/keys '{"keyId":"'"setup$(date +%s)"'","name":"setup","scopes":["databases.read","databases.write","tables.read","tables.write","columns.read","columns.write","buckets.read","buckets.write"]}' \
+        | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p')"
+    [ -n "$key" ]
+}
+
 echo "Creating the test project"
-console POST /account '{"userId":"admin","email":"admin@example.com","password":"integration-admin-1","name":"Admin"}' >/dev/null || true
-console POST /account/sessions/email '{"email":"admin@example.com","password":"integration-admin-1"}' >/dev/null
-console POST /teams '{"teamId":"org","name":"Org"}' >/dev/null || true
-console POST /projects '{"projectId":"dtest","name":"D test","teamId":"org","region":"default"}' >/dev/null || true
-key="$(console POST /projects/dtest/keys '{"keyId":"'"setup$(date +%s)"'","name":"setup","scopes":["databases.read","databases.write","tables.read","tables.write","columns.read","columns.write","buckets.read","buckets.write"]}' \
-    | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p')"
+retry sign_in
+retry create_project
+retry create_key
 
 server() { # method path json
     curl -sf --noproxy '*' -X "$1" "$endpoint$2" -H "Content-Type: application/json" \

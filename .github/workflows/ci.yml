@@ -6,20 +6,35 @@ on:
 
 jobs:
   test:
-    name: Unit tests (${{ matrix.os }})
+    name: Unit tests (${{ matrix.os }}, ${{ matrix.compiler }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        compiler: [ldc-1.40.1, ldc-latest, dmd-latest]
+        exclude:
+          # DMD has no native Apple Silicon backend.
+          - os: macos-latest
+            compiler: dmd-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dlang-community/setup-dlang@v2
         with:
-          compiler: ldc-1.40.1
+          compiler: ${{ matrix.compiler }}
+      - name: Toolchain sanity check
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/hello" && cd "$RUNNER_TEMP/hello"
+          printf 'import std.stdio; void main() { writeln("hello"); }\n' > hello.d
+          $DC hello.d && ./hello
       - name: Unit tests
         run: dub test
+      - name: Backtrace of a crashing test run
+        if: failure() && runner.os == 'macOS'
+        run: lldb --batch -o run -o "thread backtrace all" ./appwrited-test-unittest || true
       - name: Build the examples
+        shell: bash
         run: |
           cd examples/basic && dub build && cd ../realtime && dub build
 
