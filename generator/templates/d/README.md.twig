@@ -41,7 +41,9 @@ or, from a local checkout:
 ```
 
 Requires a D compiler with frontend 2.108 or newer (DMD 2.108+, LDC 1.38+),
-for named arguments. libcurl must be installed at run time: it is on every
+for named arguments; on current macOS releases use a recent LDC (1.40 fails
+to build even a hello world there). CI tests LDC and DMD on Linux and
+Windows and LDC on macOS. libcurl must be installed at run time: it is on every
 Linux distribution and macOS; on Windows, ship the `libcurl.dll` that comes with
 DMD and LDC next to your executable.
 

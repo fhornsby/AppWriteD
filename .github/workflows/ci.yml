@@ -16,6 +16,9 @@ jobs:
           # DMD has no native Apple Silicon backend.
           - os: macos-latest
             compiler: dmd-latest
+          # LDC 1.40 cannot build even a hello world on current macOS runners.
+          - os: macos-latest
+            compiler: ldc-1.40.1
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -30,9 +33,6 @@ jobs:
           $DC hello.d && ./hello
       - name: Unit tests
         run: dub test
-      - name: Backtrace of a crashing test run
-        if: failure() && runner.os == 'macOS'
-        run: lldb --batch -o run -o "thread backtrace all" ./appwrited-test-unittest || true
       - name: Build the examples
         shell: bash
         run: |
