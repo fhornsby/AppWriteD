@@ -25,6 +25,7 @@ module appwrite.async;
 
 import core.sync.condition : Condition;
 import core.sync.mutex : Mutex;
+import std.parallelism : TaskPool;
 import std.traits : isCallable, ReturnType;
 
 /// Decides where callbacks run.
@@ -302,6 +303,28 @@ final class Future(T)
     }
 }
 
+private __gshared TaskPool pool;
+
+/**
+ * The threads `async` runs work on. Requests spend their time waiting on the
+ * network, so the pool has at least four threads even on a single-core
+ * machine (where std.parallelism's shared `taskPool` has none).
+ */
+private TaskPool workers()
+{
+    import std.parallelism : totalCPUs;
+
+    synchronized
+    {
+        if (pool is null)
+        {
+            pool = new TaskPool(totalCPUs > 4 ? totalCPUs : 4);
+            pool.isDaemon = true;
+        }
+        return pool;
+    }
+}
+
 /**
  * Run `work` on a worker thread and return a `Future` for its result.
  * Callbacks registered on the future run through `dispatcher` (the default
@@ -310,12 +333,12 @@ final class Future(T)
 auto async(F)(F work, Dispatcher dispatcher = null) if (isCallable!F)
 {
     import std.functional : toDelegate;
-    import std.parallelism : task, taskPool;
+    import std.parallelism : task;
 
     alias T = ReturnType!F;
     auto future = new Future!T(dispatcher);
     auto run = toDelegate(work);
-    taskPool.put(task({
+    workers().put(task({
         try
         {
             static if (is(T == void))
@@ -354,7 +377,9 @@ unittest
     }
     catch (Exception e)
         assert(e.msg == "boom");
-    ui.process();
+    // get() returns once the result is known; callbacks are queued just after.
+    while (!failing.isDone || ui.pending)
+        ui.process();
     assert(atomicLoad(calls) == 2);
 
     auto nothing = async(() {}, ui);
