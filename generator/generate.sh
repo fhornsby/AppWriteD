@@ -3,6 +3,7 @@
 #
 #   ./generate.sh                         API version from config.json
 #   ./generate.sh --spec-version=2.4.x    another Appwrite API version
+#   ./generate.sh --spec-commit=main      the latest specs instead of the pinned commit
 #   ./generate.sh --spec-file=spec.json   a local OpenAPI 3 document
 #   ./generate.sh --version=0.2.0         SDK version (default from config.json)
 #

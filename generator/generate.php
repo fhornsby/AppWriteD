@@ -3,7 +3,7 @@
 /**
  * Generate the D client SDK from an Appwrite OpenAPI 3 specification.
  *
- *   php generate.php [--spec-version=2.5.x] [--spec-file=path] [--version=x.y.z] [--out=dir]
+ *   php generate.php [--spec-version=2.5.x] [--spec-commit=sha|main] [--spec-file=path] [--version=x.y.z] [--out=dir]
  *
  * By default the spec is downloaded from github.com/appwrite/specs and the SDK
  * is written to the repository root (the directory above this one). Only the
@@ -16,10 +16,12 @@ use AppwriteD\Generator\D;
 use AppwriteD\Generator\SDK;
 use Utopia\OpenAPI\Parser;
 
-$options = getopt('', ['spec-version:', 'spec-file:', 'version:', 'out:', 'platform:']);
+$options = getopt('', ['spec-version:', 'spec-commit:', 'spec-file:', 'version:', 'out:', 'platform:']);
 $config = json_decode((string) file_get_contents(__DIR__ . '/config.json'), true, flags: JSON_THROW_ON_ERROR);
 
 $specVersion = $options['spec-version'] ?? $config['specVersion'];
+// Specs are read from a pinned commit of appwrite/specs so generation is reproducible.
+$specCommit = $options['spec-commit'] ?? $config['specCommit'] ?? 'main';
 $version = $options['version'] ?? $config['version'];
 $platform = $options['platform'] ?? 'client';
 $out = rtrim($options['out'] ?? dirname(__DIR__), '/');
@@ -28,7 +30,7 @@ $specFile = $options['spec-file'] ?? getenv('SDK_GEN_SPEC_FILE') ?: null;
 if ($specFile !== null) {
     $spec = file_get_contents($specFile);
 } else {
-    $url = "https://raw.githubusercontent.com/appwrite/specs/main/specs/{$specVersion}/open-api3-{$specVersion}.json";
+    $url = "https://raw.githubusercontent.com/appwrite/specs/{$specCommit}/specs/{$specVersion}/open-api3-{$specVersion}.json";
     fwrite(STDERR, "Downloading {$url}\n");
     $spec = file_get_contents($url);
 }

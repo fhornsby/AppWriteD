@@ -3,6 +3,7 @@
     "packageName": "appwrited",
     "version": "0.1.0",
     "specVersion": "2.5.x",
+    "specCommit": "51f4d07a0440c48159a0b2ca124940a5dde6bf63",
     "description": "Appwrite client SDK for the D programming language. Use it to connect desktop apps, games and UI toolkits written in D to an Appwrite server: accounts and sessions, databases, storage, functions, realtime and more.",
     "shortDescription": "Appwrite client SDK for D",
     "url": "https://github.com/fhornsby/AppWriteD",
@@ -13,8 +14,12 @@
     "changelogFile": "CHANGELOG.md",
     "exclude": {
         "services": [
-            {"name": "documentsDB"},
-            {"name": "vectorsDB"}
+            {
+                "name": "documentsDB"
+            },
+            {
+                "name": "vectorsDB"
+            }
         ]
     }
 }

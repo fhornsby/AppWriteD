@@ -4,7 +4,7 @@
     "homepage": "https://github.com/fhornsby/AppWriteD",
     "license": "MIT",
     "authors": ["fhornsby"],
-    "copyright": "Copyright © 2026, AppWriteD contributors",
+    "copyright": "Copyright © AppWriteD contributors",
     "targetType": "library",
     "sourcePaths": ["source"],
     "importPaths": ["source"],

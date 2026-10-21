@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-1.40.1
+      - name: Unit tests
+        run: dub test
+      - name: Build the examples
+        run: |
+          cd examples/basic && dub build && cd ../realtime && dub build
+
+  e2e:
+    name: End-to-end (mock server)
+    runs-on: ubuntu-latest
+    env:
+      COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ secrets.GITHUB_TOKEN }}"}}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-1.40.1
+      - name: Install the generator
+        run: composer install --ignore-platform-reqs --no-plugins --no-scripts --prefer-dist --no-interaction
+        working-directory: generator
+      - name: Check the generated SDK is up to date with the templates
+        run: |
+          generator/generate.sh
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+      - name: End-to-end tests
+        run: tests/e2e/run.sh
+
+  integration:
+    name: Integration (Appwrite 2.5.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-1.40.1
+      - name: Integration tests against a real server
+        run: tests/integration/run.sh

@@ -142,6 +142,10 @@ final class Future(T)
     private Mutex lock;
     private Condition done;
     private Dispatcher dispatcher;
+    // `resolved` is set when the result is known; `finished` once callbacks
+    // registered before that have been posted, so a loop that drains the
+    // dispatcher until `isDone` cannot stop before they are queued.
+    private bool resolved;
     private bool finished;
     static if (!is(T == void))
         private T value;
@@ -168,7 +172,7 @@ final class Future(T)
     {
         synchronized (lock)
         {
-            while (!finished)
+            while (!resolved)
                 done.wait();
             if (error !is null)
                 throw error;
@@ -183,7 +187,7 @@ final class Future(T)
         bool runNow;
         synchronized (lock)
         {
-            if (!finished)
+            if (!resolved)
             {
                 if (onSuccess !is null)
                     successCallbacks ~= onSuccess;
@@ -235,15 +239,23 @@ final class Future(T)
         ErrorCallback[] failures;
         synchronized (lock)
         {
-            if (finished)
+            if (resolved)
                 return;
-            finished = true;
+            resolved = true;
             error = exception;
             successes = successCallbacks;
             failures = errorCallbacks;
             successCallbacks = null;
             errorCallbacks = null;
             done.notifyAll();
+        }
+        scope (exit)
+        {
+            synchronized (lock)
+            {
+                finished = true;
+                done.notifyAll();
+            }
         }
         if (exception is null)
         {
@@ -339,5 +351,15 @@ unittest
 
     auto nothing = async(() {}, ui);
     nothing.get();
+
+    // A loop that drains until isDone must always see the callback.
+    foreach (i; 0 .. 200)
+    {
+        shared bool ran;
+        auto quick = async(() => i, ui).then((int value) { ran = true; });
+        while (!quick.isDone || ui.pending)
+            ui.process();
+        assert(ran);
+    }
 }
 

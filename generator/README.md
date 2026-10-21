@@ -27,11 +27,14 @@ pick up generator fixes and new spec features.
 composer install                        # once; any PHP works with --ignore-platform-reqs
 ./generate.sh                           # Appwrite API version from config.json
 ./generate.sh --spec-version=2.4.x      # a different Appwrite release
+./generate.sh --spec-commit=main        # latest specs, not the commit pinned in config.json
 ./generate.sh --spec-file=my-spec.json  # a local OpenAPI 3 document
 ./generate.sh --version=0.2.0           # set the SDK version
 ```
 
-Specs are fetched from https://github.com/appwrite/specs. Pick the version that
+Specs are fetched from https://github.com/appwrite/specs at the commit pinned
+in `config.json` (`specCommit`), so regenerating is reproducible; bump it to
+pick up spec fixes. Pick the version that
 matches your server: Appwrite Cloud runs the latest, self-hosted servers report
 theirs in the console footer. The generated client sends
 `X-Appwrite-Response-Format` for that version, so an SDK generated for an older
@@ -46,6 +49,7 @@ API keeps working against a newer server.
 ```sh
 cd .. && dub test                       # unit tests in the runtime modules
 tests/e2e/run.sh                        # end-to-end, against the upstream mock server
+tests/integration/run.sh                # integration, against a real Appwrite server
 ```
 
 The end-to-end suite generates the SDK from the generator's own test fixture,
@@ -57,6 +61,18 @@ and multipart encoding, chunked uploads, downloads, model defaults, errors,
 cookies, every Query/Permission/Role/ID/Channel/Operator helper, and the
 realtime protocol (subscribe, query filters, errors, unsubscribe, update,
 presence, disconnect).
+
+The integration suite starts a real Appwrite server (API, realtime, worker,
+MariaDB and Redis) with Docker Compose, creates a project with a table and a
+bucket through the console API, and runs `tests/integration` as an end user:
+sign-up and sign-in, session cookies persisted and reused by a new client, JWTs,
+preferences, rows with queries and row-level permissions, realtime create,
+update and delete events over an authenticated socket, a 12 MB chunked upload
+downloaded back intact, avatars, locale, `async` with a dispatcher, error
+mapping and sign-out.
+
+All three suites run in GitHub Actions (`.github/workflows/ci.yml`); unit tests
+run on Linux, macOS and Windows.
 
 ## Design notes
 

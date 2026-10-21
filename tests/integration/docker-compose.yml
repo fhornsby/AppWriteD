@@ -1,0 +1,62 @@
+# A minimal Appwrite server for the integration test: API, realtime and the
+# background worker, with MariaDB and Redis. Not for production use.
+x-appwrite: &appwrite
+  image: ${APPWRITE_IMAGE:-appwrite/appwrite:2.5.0}
+  env_file: appwrite.env
+  networks: [appwrite]
+  volumes:
+    - uploads:/storage/uploads
+    - cache:/storage/cache
+    - config:/storage/config
+    - certificates:/storage/certificates
+    - functions:/storage/functions
+    - sites:/storage/sites
+    - builds:/storage/builds
+    - imports:/storage/imports
+  depends_on:
+    mariadb:
+      condition: service_healthy
+    redis:
+      condition: service_started
+
+services:
+  appwrite:
+    <<: *appwrite
+    ports: ["${APPWRITE_PORT:-9080}:80"]
+  appwrite-realtime:
+    <<: *appwrite
+    entrypoint: realtime
+    ports: ["${APPWRITE_REALTIME_PORT:-9081}:80"]
+  appwrite-worker:
+    <<: *appwrite
+    entrypoint: worker
+  mariadb:
+    image: ${MARIADB_IMAGE:-mariadb:10.11}
+    networks: [appwrite]
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootsecretpassword
+      - MYSQL_DATABASE=appwrite
+      - MYSQL_USER=user
+      - MYSQL_PASSWORD=password
+    command: "mysqld --innodb-flush-method=fsync"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4.7-alpine}
+    networks: [appwrite]
+
+networks:
+  appwrite:
+
+volumes:
+  uploads: {}
+  cache: {}
+  config: {}
+  certificates: {}
+  functions: {}
+  sites: {}
+  builds: {}
+  imports: {}

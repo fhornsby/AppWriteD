@@ -1,0 +1,8 @@
+{
+    "name": "integration",
+    "description": "Integration test of the SDK against a real Appwrite server",
+    "targetType": "executable",
+    "dependencies": {
+        "appwrited": { "path": "../.." }
+    }
+}
