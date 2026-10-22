@@ -30,10 +30,13 @@ enum : int
     CURLOPT_HTTPPROXYTUNNEL = 61,
     CURLOPT_SSL_VERIFYPEER = 64,
     CURLOPT_SSL_VERIFYHOST = 81,
+    CURLOPT_HTTP_VERSION = 84,
     CURLOPT_NOSIGNAL = 99,
     CURLOPT_CONNECT_ONLY = 141,
     CURLOPT_CONNECTTIMEOUT_MS = 156,
 }
+
+enum c_long CURL_HTTP_VERSION_1_1 = 2;
 
 enum int CURLINFO_ACTIVESOCKET = 0x500000 + 44;
 enum int CURLINFO_LASTSOCKET = 0x200000 + 29;
@@ -160,6 +163,10 @@ final class CurlConnection
         errorBuffer[] = 0;
         check(curl.easy_setopt(handle, CURLOPT_URL, url.toStringz));
         check(curl.easy_setopt(handle, CURLOPT_CONNECT_ONLY, cast(c_long) 1));
+        // Offer only HTTP/1.1 in TLS's ALPN. A server that picks HTTP/2 makes libcurl turn the
+        // upgrade request sent below into an HTTP/2 request, which servers reject, and print
+        // the answer to stdout.
+        check(curl.easy_setopt(handle, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1));
         check(curl.easy_setopt(handle, CURLOPT_NOSIGNAL, cast(c_long) 1));
         check(curl.easy_setopt(handle, CURLOPT_HTTPPROXYTUNNEL, cast(c_long) 1));
         check(curl.easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, cast(c_long) connectTimeoutMs));
